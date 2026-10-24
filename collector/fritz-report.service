@@ -1,0 +1,13 @@
+[Unit]
+Description=Energiebericht und Alarme (ausgehend, read-only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=pi
+WorkingDirectory=/home/pi/energiepi
+ExecStart=/home/pi/energiepi/.venv/bin/python /home/pi/energiepi/report.py
+# Ein fehlgeschlagener Lauf darf den Timer nicht abwuergen: die naechste Stunde
+# versucht es erneut. Ohne Netz ist Scheitern der Normalfall, nicht die Ausnahme.
+SuccessExitStatus=0 1

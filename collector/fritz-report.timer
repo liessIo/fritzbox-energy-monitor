@@ -1,0 +1,12 @@
+[Unit]
+Description=Energiebericht stuendlich pruefen
+
+[Timer]
+OnCalendar=hourly
+# Verpasste Laeufe nachholen, falls der Pi aus war — sonst faellt der
+# Herzschlag nach einem Neustart bis zur naechsten vollen Stunde aus.
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

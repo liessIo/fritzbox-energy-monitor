@@ -1,0 +1,25 @@
+[Unit]
+Description=FRITZ!Box energy harvester (read-only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/energiepi
+ExecStart=/home/pi/energiepi/.venv/bin/python /home/pi/energiepi/harvester.py
+Restart=always
+RestartSec=30
+
+# Credentials are read by the script from fritzbox.env (chmod 600) next to it,
+# not injected here — that keeps passwords with special characters out of
+# systemd's environment parsing and out of `systemctl show`.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/pi/energiepi
+
+[Install]
+WantedBy=multi-user.target

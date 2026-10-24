@@ -1,0 +1,28 @@
+# Secrets — FRITZ!Box credentials live on the Pi only, never in the repo.
+*.env
+!*.env.example
+.env
+
+# Data — the database lives on the Pi, backups under ~/Backups.
+*.db
+*.db-wal
+*.db-shm
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Swift / Xcode
+.build/
+build/
+*.xcuserstate
+DerivedData/
+
+.DS_Store
+
+# WireGuard-Konfiguration: enthaelt private Schluessel, niemals committen
+*.conf
+
+# Persönliche Werte dieser Installation (IPs, Namen, DynDNS)
+CLAUDE.local.md

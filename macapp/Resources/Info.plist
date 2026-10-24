@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>EnergyMonitor</string>
+    <key>CFBundleIdentifier</key>
+    <string>local.energymonitor</string>
+    <key>CFBundleName</key>
+    <string>EnergyMonitor</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <!-- Menu bar only, no dock icon. -->
+    <key>LSUIElement</key>
+    <true/>
+    <!-- A menu bar app has no windows and looks idle; without these macOS is
+         free to terminate it to reclaim resources. -->
+    <key>NSSupportsSuddenTermination</key>
+    <false/>
+    <key>NSSupportsAutomaticTermination</key>
+    <false/>
+    <!-- Plain HTTP to the Pi on the LAN, nothing else. -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
+</dict>
+</plist>

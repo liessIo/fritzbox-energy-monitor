@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>local.energymonitor</string>
+    <!-- Über "open" statt direkt die Binärdatei: so startet die App über
+         LaunchServices, wie beim Doppelklick im Finder. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/open</string>
+        <string>-a</string>
+        <string>PFAD_ZUR_APP</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <!-- Kein KeepAlive: "Beenden" im Popover soll auch wirklich beenden und
+         nicht sofort einen Neustart auslösen. -->
+</dict>
+</plist>

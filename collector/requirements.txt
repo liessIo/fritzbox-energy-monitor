@@ -1,0 +1,3 @@
+fritzconnection>=1.15
+fastapi
+uvicorn[standard]

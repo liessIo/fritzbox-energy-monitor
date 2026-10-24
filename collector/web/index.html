@@ -1,0 +1,622 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Energiemonitor</title>
+<style>
+  /* Farben aus der validierten Standardpalette: Platz 1 Blau, 2 Orange, 3 Aqua.
+     Die dunklen Werte sind eigene Stufen für die dunkle Fläche, keine Umkehrung. */
+  :root {
+    color-scheme: light;
+    --grund:    #f4f4f2;
+    --flaeche:  #fcfcfb;
+    --rand:     #e3e2dd;
+    --gitter:   #e9e8e3;
+    --ink:      #0b0b0b;
+    --ink2:     #52514e;
+    --ink3:     #86857f;
+    --serie1:   #2a78d6;
+    --serie2:   #eb6834;
+    --serie3:   #1baf7a;
+    --kritisch: #d03b3b;
+    --gut:      #0ca30c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --grund:   #121211;
+      --flaeche: #1a1a19;
+      --rand:    #2f2f2c;
+      --gitter:  #2a2a27;
+      --ink:     #ffffff;
+      --ink2:    #c3c2b7;
+      --ink3:    #8d8c84;
+      --serie1:  #3987e5;
+      --serie2:  #d95926;
+      --serie3:  #199e70;
+      --kritisch:#e66767;
+      --gut:     #0ca30c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 20px 16px 40px; background: var(--grund); color: var(--ink);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1120px; margin: 0 auto; display: grid; gap: 14px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+           flex-wrap: wrap; padding: 0 4px 2px; }
+  header h1 { font-size: 17px; font-weight: 600; margin: 0; letter-spacing: -.2px; }
+  .status { font-size: 12.5px; color: var(--ink3); }
+  .karte { background: var(--flaeche); border: 1px solid var(--rand); border-radius: 14px;
+           padding: 16px 18px; }
+  .karte > h2 { font-size: 12.5px; font-weight: 600; letter-spacing: .3px; text-transform: uppercase;
+                color: var(--ink3); margin: 0 0 14px; }
+
+  .kacheln { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+  .kachel .label { font-size: 12.5px; color: var(--ink3); margin-bottom: 6px; }
+  .kachel .zahl { font-size: 38px; font-weight: 600; letter-spacing: -1.2px; line-height: 1.05; }
+  .kachel .zahl .einheit { font-size: 19px; font-weight: 500; color: var(--ink2); margin-left: 3px;
+                           letter-spacing: 0; }
+  .kachel .unten { font-size: 12.5px; color: var(--ink2); margin-top: 6px; }
+  .balken { height: 5px; border-radius: 3px; background: var(--gitter); margin-top: 10px; overflow: hidden; }
+  .balken > i { display: block; height: 100%; border-radius: 3px; background: var(--serie1); }
+
+  .reihe { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+  .leiste { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0 14px; }
+  .zeitraum { font-size: 12.5px; color: var(--ink3); align-self: center; }
+  button { font: inherit; font-size: 12.5px; padding: 5px 11px; border-radius: 8px;
+           border: 1px solid var(--rand); background: transparent; color: var(--ink2); cursor: pointer; }
+  button:hover { border-color: var(--ink3); color: var(--ink); }
+  button.an { background: var(--ink); border-color: var(--ink); color: var(--flaeche); }
+
+  .plot { position: relative; }
+  /* Waagerechtes Scrollen macht der Browser selbst: .strecke ist so breit wie
+     die ganze Aufzeichnung, das Diagramm haftet links und wird zum
+     Scrollstand neu gezeichnet. So gibt es einen echten Scrollbalken. */
+  .roller { overflow-x: auto; overflow-y: hidden; padding-bottom: 6px; }
+  .karte { min-width: 0; }   /* sonst dehnt .strecke die Rasterspalte auf */
+  .strecke { height: 1px; }
+  svg { width: 100%; height: auto; display: block; position: sticky; left: 0;
+        user-select: none; -webkit-user-select: none; }
+  /* Eigener Balken, weil macOS den Systembalken sonst ausblendet. */
+  .roller::-webkit-scrollbar { height: 12px; }
+  .roller::-webkit-scrollbar-track { background: var(--gitter); border-radius: 6px; }
+  .roller::-webkit-scrollbar-thumb { background: var(--ink3); border-radius: 6px; }
+  .roller::-webkit-scrollbar-thumb:hover { background: var(--ink2); }
+  @supports not selector(::-webkit-scrollbar) {
+    .roller { scrollbar-color: var(--ink3) var(--gitter); }
+  }
+  .gitterlinie { stroke: var(--gitter); stroke-width: 1; }
+  .achse { stroke: var(--rand); stroke-width: 1; }
+  text { fill: var(--ink3); font-size: 12px; }
+  .tip { position: absolute; pointer-events: none; opacity: 0; transition: opacity .12s;
+         background: var(--flaeche); border: 1px solid var(--rand); border-radius: 9px;
+         padding: 7px 10px; font-size: 12.5px; color: var(--ink); white-space: nowrap;
+         box-shadow: 0 6px 20px rgba(0,0,0,.13); z-index: 3; }
+  .tip b { font-weight: 600; }
+  .tip .zeit { color: var(--ink3); display: block; font-size: 11.5px; margin-bottom: 2px; }
+  .fakten { display: flex; flex-wrap: wrap; gap: 18px; font-size: 12.5px; color: var(--ink2);
+            margin-top: 12px; }
+  .fakten b { color: var(--ink); font-weight: 600; }
+  .fehler { color: var(--kritisch); }
+  table { border-collapse: collapse; width: 100%; font-size: 12.5px; margin-top: 14px; }
+  th { text-align: right; padding: 5px 8px; color: var(--ink3); font-weight: 500;
+       border-bottom: 1px solid var(--rand); }
+  td { text-align: right; padding: 5px 8px; border-bottom: 1px solid var(--gitter); }
+  th:first-child, td:first-child { text-align: left; }
+  tr:last-child td { border-bottom: none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>Energiemonitor</h1>
+    <div class="status" id="status">lädt …</div>
+  </header>
+
+  <div class="kacheln">
+    <div class="karte kachel">
+      <div class="label">Aktuell</div>
+      <div class="zahl" id="k_jetzt">—</div>
+      <div class="unten" id="k_jetzt_unten">&nbsp;</div>
+    </div>
+    <div class="karte kachel">
+      <div class="label">Heute</div>
+      <div class="zahl" id="k_tag">—</div>
+      <div class="balken"><i id="b_tag" style="width:0"></i></div>
+      <div class="unten" id="k_tag_unten">&nbsp;</div>
+    </div>
+    <div class="karte kachel">
+      <div class="label">Diese Woche</div>
+      <div class="zahl" id="k_woche">—</div>
+      <div class="balken"><i id="b_woche" style="width:0"></i></div>
+      <div class="unten" id="k_woche_unten">&nbsp;</div>
+    </div>
+    <div class="karte kachel">
+      <div class="label">Dieser Monat</div>
+      <div class="zahl" id="k_monat">—</div>
+      <div class="balken"><i id="b_monat" style="width:0"></i></div>
+      <div class="unten" id="k_monat_unten">&nbsp;</div>
+    </div>
+  </div>
+
+  <div class="karte">
+    <h2>Wohnungszähler</h2>
+    <div class="leiste">
+      <div class="reihe" id="bereiche"></div>
+      <div class="reihe">
+        <span class="zeitraum" id="zeitraum"></span>
+        <button id="jetzt" hidden>Jetzt</button>
+      </div>
+    </div>
+    <div class="plot">
+      <div class="roller" id="roll_verlauf">
+        <svg id="verlauf" viewBox="0 0 1000 300"></svg>
+        <div class="strecke"></div>
+      </div>
+      <div class="tip" id="tip_verlauf"></div>
+    </div>
+    <div class="fakten" id="verlaufwerte"></div>
+  </div>
+
+  <div class="karte" id="geraetekarte" hidden>
+    <h2>Messsteckdose</h2>
+    <div class="reihe" id="geraete"></div>
+    <div class="plot">
+      <div class="roller" id="roll_geraet">
+        <svg id="geraet" viewBox="0 0 1000 230"></svg>
+        <div class="strecke"></div>
+      </div>
+      <div class="tip" id="tip_geraet"></div>
+    </div>
+    <div class="fakten" id="geraetwerte"></div>
+  </div>
+
+  <div class="karte">
+    <h2>Verbrauch</h2>
+    <div class="leiste">
+      <div class="reihe" id="perioden"></div>
+      <div class="reihe"><button id="neueste" hidden>Neueste</button></div>
+    </div>
+    <div class="plot">
+      <div class="roller" id="roll_verbrauch">
+        <svg id="verbrauch" viewBox="0 0 1000 230"></svg>
+        <div class="strecke"></div>
+      </div>
+      <div class="tip" id="tip_verbrauch"></div>
+    </div>
+    <table id="tabelle"></table>
+  </div>
+
+</div>
+<script>
+const BEREICHE = [["1 h", 3600], ["6 h", 21600], ["24 h", 86400],
+                  ["7 Tage", 604800], ["30 Tage", 2592000], ["1 Jahr", 31536000]];
+// Balken je Ansicht im Verbrauchsdiagramm.
+const FENSTER = { day: 21, month: 12 };
+// ende: rechter Rand der Verlaufsdiagramme in Unix-Sekunden, null = läuft mit
+//       der Gegenwart mit. erster: älteste Messung, weiter zurück geht es nicht.
+// versatz: um wie viele Tage/Monate das Verbrauchsdiagramm zurückgeschoben ist.
+// deckel: 99-%-Wert der Leistung je Reihe, für die feste Skala beim Scrollen.
+const zustand = { bereich: 86400, ende: null, erster: 0, gezeichnet: 0, lauf: 0, gemalt: 0,
+                  geraet: null, periode: "day", versatz: 0, verbrauch: [], preis: 0.30, deckel: {} };
+// Linker und rechter Rand der Zeichenfläche, in viewBox-Einheiten.
+const L = 54, R = 14;
+const $ = (id) => document.getElementById(id);
+const NS = "http://www.w3.org/2000/svg";
+
+async function api(pfad, params = {}) {
+  const url = new URL(pfad, location.origin);
+  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+  const antwort = await fetch(url);
+  if (!antwort.ok) throw new Error(pfad.split("?")[0] + ": HTTP " + antwort.status);
+  return antwort.json();
+}
+const el = (name, attrs = {}, text = null) => {
+  const k = document.createElementNS(NS, name);
+  for (const [a, v] of Object.entries(attrs)) k.setAttribute(a, v);
+  if (text !== null) k.textContent = text;
+  return k;
+};
+const zahl = (v, n = 0) => v.toLocaleString("de-DE", { minimumFractionDigits: n, maximumFractionDigits: n });
+
+/** Achsenschritt: 1, 2 oder 5 mal Zehnerpotenz, höchstens fünf Schritte bis
+    zum Maximum — damit an der Achse runde Zahlen stehen (2.000, nicht 1.375)
+    und die Obergrenze beim Nachladen nicht bei jedem neuen Messwert springt. */
+function achsenschritt(max) {
+  if (!(max > 0)) return 20;
+  const zehner = Math.pow(10, Math.floor(Math.log10(max / 5)));
+  return [1, 2, 5, 10].find(f => f * zehner * 5 >= max) * zehner;
+}
+function zeitformat(spanne) {
+  if (spanne <= 86400) return (d) => d.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
+  if (spanne <= 2592000) return (d) => d.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" });
+  return (d) => d.toLocaleDateString("de-DE", { month: "short" });
+}
+
+/** Zeichnet das Zeitfenster t0..t1 — die Achse folgt dem Fenster, nicht den
+    Punkten, sonst würde sich die Kurve beim Schieben an Lücken dehnen. */
+function linie(svgId, tipId, punkte, farbe, t0, t1, deckel = 0) {
+  const svg = $(svgId), tip = $(tipId);
+  svg.replaceChildren();
+  const [B, H] = svg.getAttribute("viewBox").split(" ").slice(2).map(Number);
+  const O = 24, U = 34;
+  if (!punkte.length) {
+    svg.append(el("text", { x: B / 2, y: H / 2, "text-anchor": "middle" }, "keine Daten im Zeitraum"));
+    tip.style.opacity = 0;
+    svg.onpointermove = svg.onpointerleave = null;
+    return;
+  }
+  t1 = Math.max(t1, t0 + 1);
+  // Mit Deckel steht die Skala fest; was darüber liegt, läuft oben aus dem Bild.
+  const hoechst = deckel || Math.max(...punkte.map(p => p.power_max));
+  const schritt = achsenschritt(hoechst), yMax = Math.max(Math.ceil(hoechst / schritt), 1) * schritt;
+  const x = (ts) => L + (ts - t0) / (t1 - t0) * (B - L - R);
+  const y = (w) => H - U - (w / yMax) * (H - O - U);
+
+  for (let wert = 0; wert <= yMax + schritt / 2; wert += schritt) {
+    const yy = y(wert);
+    svg.append(el("line", { x1: L, y1: yy, x2: B - R, y2: yy, class: "gitterlinie" }));
+    svg.append(el("text", { x: L - 9, y: yy + 4, "text-anchor": "end" }, zahl(wert, schritt < 1 ? 1 : 0)));
+  }
+  svg.append(el("text", { x: L - 9, y: 10, "text-anchor": "end", "font-size": 11 }, "W"));
+  // Alles, was an der Zeit hängt, liegt in einer Gruppe: sie wandert beim
+  // Schieben mit, bis die nachgeladenen Daten da sind (zeitAbgleichen).
+  const clip = el("clipPath", { id: "clip_" + svgId });
+  clip.append(el("rect", { x: L, y: O - 8, width: B - L - R, height: H - O + 8 }));
+  const rahmen = el("g", { "clip-path": `url(#clip_${svgId})` });
+  const inhalt = el("g", { class: "inhalt" });
+  rahmen.append(inhalt);
+  svg.append(clip, rahmen);
+  const fmt = zeitformat(t1 - t0);
+  for (let i = 0; i <= 4; i++) {
+    const ts = t0 + (t1 - t0) * i / 4;
+    inhalt.append(el("text", { x: x(ts), y: H - 11,
+      "text-anchor": i === 0 ? "start" : (i === 4 ? "end" : "middle") }, fmt(new Date(ts * 1000))));
+  }
+  // Min/Max-Band: die Spitzen, die der Mittelwert im Bündel verschluckt.
+  const oben = punkte.map(p => `${x(p.ts)},${y(p.power_max)}`).join(" ");
+  const unten = punkte.slice().reverse().map(p => `${x(p.ts)},${y(p.power_min)}`).join(" ");
+  inhalt.append(el("polygon", { points: `${oben} ${unten}`, fill: farbe, opacity: .16 }));
+  inhalt.append(el("polyline", { points: punkte.map(p => `${x(p.ts)},${y(p.power_avg)}`).join(" "),
+    fill: "none", stroke: farbe, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+  svg.append(el("line", { x1: L, y1: H - U, x2: B - R, y2: H - U, class: "achse" }));
+
+  const kreuz = el("line", { y1: O, y2: H - U, class: "achse", opacity: 0 });
+  const punkt = el("circle", { r: 4.5, fill: farbe, stroke: "var(--flaeche)", "stroke-width": 2, opacity: 0 });
+  inhalt.append(kreuz, punkt);
+  const flaeche = el("rect", { x: L, y: O, width: B - L - R, height: H - O - U, fill: "transparent" });
+  svg.append(flaeche);
+
+  const zeigen = (ev) => {
+    const box = svg.getBoundingClientRect();
+    const px = (ev.clientX - box.left) / box.width * B;
+    const ts = t0 + (px - L) / (B - L - R) * (t1 - t0);
+    let nah = punkte[0];
+    for (const p of punkte) if (Math.abs(p.ts - ts) < Math.abs(nah.ts - ts)) nah = p;
+    kreuz.setAttribute("x1", x(nah.ts)); kreuz.setAttribute("x2", x(nah.ts));
+    kreuz.setAttribute("opacity", .5);
+    punkt.setAttribute("cx", x(nah.ts)); punkt.setAttribute("cy", Math.max(y(nah.power_avg), O));
+    punkt.setAttribute("opacity", 1);
+    const d = new Date(nah.ts * 1000);
+    tip.innerHTML = `<span class="zeit">${d.toLocaleString("de-DE",
+        { weekday: "short", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</span>`
+      + `<b>${zahl(nah.power_avg)} W</b>`
+      + (nah.power_max > nah.power_min ? ` <span style="color:var(--ink3)">${zahl(nah.power_min)}–${zahl(nah.power_max)}</span>` : "");
+    tip.style.opacity = 1;
+    const links = x(nah.ts) / B * box.width;
+    tip.style.left = Math.min(Math.max(links - tip.offsetWidth / 2, 0), box.width - tip.offsetWidth) + "px";
+    tip.style.top = Math.max(y(nah.power_avg) / H * box.height - tip.offsetHeight - 12, 0) + "px";
+  };
+  svg.onpointermove = zeigen;
+  svg.onpointerleave = () => {
+    tip.style.opacity = 0; kreuz.setAttribute("opacity", 0); punkt.setAttribute("opacity", 0);
+  };
+}
+
+// Die tatsaechlich abgedeckte Dauer. Ein Monat hat nicht 730 h, wenn die
+// Aufzeichnung am 13. begann oder der Monat noch laeuft — mit der Pauschale
+// waere die Durchschnittsleistung in genau diesen Zeitraeumen zu niedrig.
+function zeitraumStunden(alle, i) {
+  const jetzt = Date.now() / 1000;
+  const naechste = i + 1 < alle.length ? alle[i + 1].start_ts : jetzt;
+  const von = alle[i].partial_from_ts ?? alle[i].start_ts;
+  return Math.max((Math.min(naechste, jetzt) - von) / 3600, 1);
+}
+
+const abKuerzel = (ts) => new Date(ts * 1000)
+  .toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" });
+
+function balken(svgId, tipId, eintraege, gipfel) {
+  const svg = $(svgId), tip = $(tipId);
+  svg.replaceChildren();
+  const [B, H] = svg.getAttribute("viewBox").split(" ").slice(2).map(Number);
+  const O = 24, U = 36;
+  const mit = eintraege;
+  if (!mit.length) {
+    svg.append(el("text", { x: B / 2, y: H / 2, "text-anchor": "middle" },
+      "noch kein abgeschlossener Zeitraum"));
+    return;
+  }
+  const schritt = achsenschritt(gipfel), yMax = Math.max(Math.ceil(gipfel / schritt), 1) * schritt;
+  const y = (v) => H - U - (v / yMax) * (H - O - U);
+  const feld = (B - L - R) / mit.length;
+  for (let wert = 0; wert <= yMax + schritt / 2; wert += schritt) {
+    const yy = y(wert);
+    svg.append(el("line", { x1: L, y1: yy, x2: B - R, y2: yy, class: "gitterlinie" }));
+    svg.append(el("text", { x: L - 9, y: yy + 4, "text-anchor": "end" }, zahl(wert, 1)));
+  }
+  svg.append(el("text", { x: L - 9, y: 10, "text-anchor": "end", "font-size": 11 }, "kWh"));
+  mit.forEach((e, i) => {
+    const px = L + i * feld + feld * .12, breite = feld * .76;
+    const rect = el("rect", { x: px, y: y(e.kwh), width: breite, height: (H - U) - y(e.kwh),
+                              fill: "var(--serie3)", rx: 4 });
+    const teil = e.partial_from_ts != null;
+    if (teil) {
+      rect.setAttribute("fill-opacity", ".4");
+      rect.setAttribute("stroke", "var(--serie3)");
+      rect.setAttribute("stroke-dasharray", "3 2");
+    }
+    svg.append(rect);
+    const d = new Date(e.start_ts * 1000);
+    const beschriftung = zustand.periode === "day"
+      ? d.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" })
+      : d.toLocaleDateString("de-DE", { month: "short" });
+    // Jeder dritte Tag, am Datum festgemacht statt an der Position —
+    // sonst springen die Beschriftungen beim Schieben von Balken zu Balken.
+    if (mit.length <= 14 || Math.round(e.start_ts / 86400) % 3 === 0)
+      svg.append(el("text", { x: px + breite / 2, y: H - 12, "text-anchor": "middle" }, beschriftung));
+    rect.onpointerenter = () => {
+      const box = svg.getBoundingClientRect();
+      tip.innerHTML = `<span class="zeit">${e.start}</span><b>${zahl(e.kwh, 2)} kWh</b>`
+        + ` <span style="color:var(--ink3)">${zahl(e.kwh * zustand.preis, 2)} €</span>`
+        + (teil ? `<span style="color:var(--ink3)"> · erst ab ${abKuerzel(e.partial_from_ts)}</span>` : "");
+      tip.style.opacity = 1;
+      const links = (px + breite / 2) / B * box.width;
+      tip.style.left = Math.min(Math.max(links - tip.offsetWidth / 2, 0), box.width - tip.offsetWidth) + "px";
+      tip.style.top = Math.max(y(e.kwh) / H * box.height - tip.offsetHeight - 10, 0) + "px";
+    };
+    rect.onpointerleave = () => { tip.style.opacity = 0; };
+  });
+  svg.append(el("line", { x1: L, y1: H - U, x2: B - R, y2: H - U, class: "achse" }));
+}
+
+function knoepfe(behaelter, eintraege, aktiv, setzen) {
+  behaelter.replaceChildren();
+  for (const [text, wert] of eintraege) {
+    const b = document.createElement("button");
+    b.textContent = text;
+    if (wert === aktiv) b.className = "an";
+    b.onclick = () => { setzen(wert); zeichne(); };
+    behaelter.append(b);
+  }
+}
+
+function kachel(prefix, block, einheit = "kWh") {
+  if (!block || block.prognose_kwh === null) { $(prefix).textContent = "—"; return; }
+  const istHeute = prefix === "k_tag";
+  $(prefix).innerHTML = `${zahl(block.prognose_kwh, istHeute ? 2 : 1)}<span class="einheit">${einheit}</span>`;
+  $("b_" + prefix.slice(2)).style.width = Math.round(block.anteil_erledigt * 100) + "%";
+  $(prefix + "_unten").innerHTML =
+    `bisher <b style="font-weight:600">${zahl(block.ist_kwh, 2)}</b> · erwartet `
+    + `${zahl(block.unten_kwh, 1)}–${zahl(block.oben_kwh, 1)} · ${zahl(block.prognose_euro, 2)} €`;
+}
+
+const melden = (fehler) => { $("status").innerHTML = `<span class="fehler">${fehler.message}</span>`; };
+
+/** Das angezeigte Zeitfenster [von, bis]. Weiter zurück als bis zur ältesten
+    Messung geht es nicht; ist das Fenster länger als die ganze Aufzeichnung,
+    bleibt es an der Gegenwart. */
+function fenster() {
+  const jetzt = Math.floor(Date.now() / 1000);
+  if (zustand.ende !== null) {
+    const ende = Math.max(zustand.ende, zustand.erster + zustand.bereich);
+    zustand.ende = ende >= jetzt ? null : ende;
+  }
+  const bis = Math.floor(zustand.ende ?? jetzt);
+  return [bis - zustand.bereich, bis];
+}
+
+/** Setzt Breite und Stand eines Rollers. `anteil`: 0 = ganz links (ältestes),
+    1 = ganz rechts. `seiten`: Länge der ganzen Strecke in Fensterbreiten. */
+function rollerStellen(roller, seiten, anteil) {
+  // Gedeckelt, weil Browser Elemente ab einigen Millionen Pixeln abschneiden.
+  const breite = Math.min(Math.max(seiten, 1) * roller.clientWidth, 8e6);
+  roller.querySelector(".strecke").style.width = breite + "px";
+  const ziel = anteil * (roller.scrollWidth - roller.clientWidth);
+  // Nur bei echter Abweichung setzen: sonst bricht der Schwung beim Wischen ab.
+  if (Math.abs(roller.scrollLeft - ziel) > 1.5) { roller.gesetzt = ziel; roller.scrollLeft = ziel; }
+}
+/** Scrollstand eines Rollers als Anteil 0..1 — oder null, wenn das Ereignis
+    nur das Echo des eigenen Setzens in rollerStellen ist. */
+function rollerAnteil(roller) {
+  if (roller.gesetzt !== undefined && Math.abs(roller.scrollLeft - roller.gesetzt) < 1.5) return null;
+  roller.gesetzt = undefined;
+  const weg = roller.scrollWidth - roller.clientWidth;
+  return roller.scrollLeft >= weg - 1 ? 1 : roller.scrollLeft / weg;
+}
+
+/** Bringt nach jeder Änderung des Zeitfensters alles in Einklang: die
+    vorhandene Zeichnung wandert mit, bis die nachgeladenen Daten da sind;
+    Zeitraum, „Jetzt“ und beide Scrollbalken folgen. */
+function zeitAbgleichen(ausser = null) {
+  const [von, bis] = fenster();
+  const dx = (zustand.gezeichnet - bis) / zustand.bereich * (1000 - L - R);
+  for (const id of ["verlauf", "geraet"])
+    $(id).querySelector(".inhalt")?.setAttribute("transform", `translate(${dx} 0)`);
+
+  const gesamt = Date.now() / 1000 - zustand.erster, frei = gesamt - zustand.bereich;
+  const anteil = zustand.ende === null || frei <= 0 ? 1 : (zustand.ende - zustand.erster - zustand.bereich) / frei;
+  for (const id of ["roll_verlauf", "roll_geraet"])
+    if ($(id) !== ausser && zustand.erster) rollerStellen($(id), gesamt / zustand.bereich, anteil);
+
+  $("jetzt").hidden = zustand.ende === null;
+  if (zustand.ende === null) { $("zeitraum").textContent = ""; return; }
+  const format = zustand.bereich <= 86400
+    ? { weekday: "short", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }
+    : { day: "2-digit", month: "2-digit", year: "numeric" };
+  const f = (ts) => new Date(ts * 1000).toLocaleString("de-DE", format);
+  $("zeitraum").textContent = `${f(von)} – ${f(bis)}`;
+}
+
+let wartet = null;
+function zeitGescrollt(ev) {
+  const roller = ev.currentTarget, anteil = rollerAnteil(roller);
+  if (anteil === null) return;
+  const jetzt = Date.now() / 1000, frei = jetzt - zustand.erster - zustand.bereich;
+  zustand.ende = anteil >= 1 ? null : zustand.erster + zustand.bereich + anteil * frei;
+  zeitAbgleichen(roller);
+  // Gedrosselt nachladen: während des Scrollens höchstens alle 120 ms.
+  wartet ??= setTimeout(() => { wartet = null; zeichneVerlauf().catch(melden); }, 120);
+}
+
+/** Der Wert, unter dem 99 % aller Messungen einer Reihe liegen. Das
+    Allzeitmaximum taugt nicht als Skala: wenige Spitzen (Haus: 5,5 kW bei
+    einem 99-%-Wert von 2,3 kW) drücken sonst jeden Tag an den Boden.
+    Einmal je Reihe geholt. */
+async function deckel(pfad, params = {}) {
+  const schluessel = params.device ?? "";
+  if (!(schluessel in zustand.deckel)) {
+    const antwort = await api(pfad, { ...params, from: zustand.erster, to: Math.floor(Date.now() / 1000) });
+    zustand.deckel[schluessel] = antwort.p99_w ?? 0;
+  }
+  return zustand.deckel[schluessel];
+}
+
+/** Die beiden Verlaufsdiagramme. Getrennt vom Rest, weil beim Scrollen nur
+    sie neu geladen werden. */
+async function zeichneVerlauf() {
+  const lauf = ++zustand.lauf;
+  const [von, bis] = fenster();
+  // An der Gegenwart passt sich die Skala dem Fenster an (sonst wäre die
+  // Nacht ein Strich am Boden). Beim Scrollen steht sie fest, damit sie
+  // unterwegs nicht springt.
+  const fest = zustand.ende !== null, geraet = zustand.geraet;
+  const [verlauf, grundlast, reihe, hoch, hochGeraet] = await Promise.all([
+    api("/history", { from: von, to: bis }),
+    api("/baseline", { from: von, to: bis }),
+    geraet ? api("/device/history", { device: geraet, from: von, to: bis }) : null,
+    fest ? deckel("/baseline") : 0,
+    fest && geraet ? deckel("/device/baseline", { device: geraet }) : 0,
+  ]);
+  if (lauf < zustand.gemalt) return;   // eine jüngere Anfrage hat schon gezeichnet
+  zustand.gemalt = lauf;
+  zustand.gezeichnet = bis;
+
+  const links = Math.max(von, zustand.erster);
+  linie("verlauf", "tip_verlauf", verlauf, "var(--serie1)", links, bis, hoch);
+  $("verlaufwerte").innerHTML = grundlast.samples
+    ? `Minimum <b>${zahl(grundlast.min_w)} W</b> · 5-%-Wert <b>${zahl(grundlast.p05_w)} W</b>`
+      + ` · Mittel <b>${zahl(grundlast.avg_w)} W</b> · ${zahl(grundlast.samples)} Messwerte`
+    : "keine Messwerte im Zeitraum";
+  if (reihe) linie("geraet", "tip_geraet", reihe, "var(--serie2)", links, bis, hochGeraet);
+  zeitAbgleichen();
+}
+
+/** Lädt alle Zeiträume auf einmal: der Scrollbalken braucht die ganze Länge
+    und die Skala das Maximum über alles. */
+async function verbrauchLaden() {
+  const periode = zustand.periode;
+  const antwort = await api("/consumption", { period: periode, n: periode === "day" ? 366 : 36 });
+  if (periode === zustand.periode) zustand.verbrauch = antwort;
+}
+
+function zeichneVerbrauch(ausser = null) {
+  const mit = zustand.verbrauch.filter(e => e.kwh !== null);
+  const breite = FENSTER[zustand.periode], frei = Math.max(mit.length - breite, 0);
+  zustand.versatz = Math.max(0, Math.min(zustand.versatz, frei));
+  const bis = mit.length - zustand.versatz;
+  balken("verbrauch", "tip_verbrauch", mit.slice(Math.max(0, bis - breite), bis),
+         Math.max(0, ...mit.map(e => e.kwh)));
+  $("neueste").hidden = zustand.versatz === 0;
+  if ($("roll_verbrauch") !== ausser)
+    rollerStellen($("roll_verbrauch"), mit.length / breite, frei ? 1 - zustand.versatz / frei : 1);
+}
+
+function verbrauchGescrollt(ev) {
+  const anteil = rollerAnteil(ev.currentTarget);
+  if (anteil === null) return;
+  const mit = zustand.verbrauch.filter(e => e.kwh !== null);
+  const versatz = Math.round((1 - anteil) * Math.max(mit.length - FENSTER[zustand.periode], 0));
+  if (versatz === zustand.versatz) return;
+  zustand.versatz = versatz;
+  zeichneVerbrauch(ev.currentTarget);
+}
+
+async function zeichne() {
+  knoepfe($("bereiche"), BEREICHE, zustand.bereich, (v) => zustand.bereich = v);
+  knoepfe($("perioden"), [["Tage", "day"], ["Monate", "month"]], zustand.periode,
+          (v) => { zustand.periode = v; zustand.versatz = 0; });
+  try {
+    const [jetzt, health, , geraete, prognose] = await Promise.all([
+      api("/latest"), api("/health"), verbrauchLaden(), api("/devices"), api("/forecast"),
+    ]);
+    zustand.preis = prognose.basis.preis_pro_kwh;
+    zustand.erster = health.first_ts ?? 0;
+
+    $("k_jetzt").innerHTML = `${zahl(jetzt.power_w)}<span class="einheit">W</span>`;
+    $("k_jetzt_unten").innerHTML = jetzt.energy_wh
+      ? `Zählerstand <b style="font-weight:600">${zahl(jetzt.energy_wh / 1000, 1)}</b> kWh` : "&nbsp;";
+    kachel("k_tag", prognose.tag);
+    kachel("k_woche", prognose.woche);
+    kachel("k_monat", prognose.monat);
+
+    const alter = Math.round(Date.now() / 1000 - jetzt.ts);
+    $("status").innerHTML =
+      `Messung vor ${alter} s · Batterie ${health.battery ?? "?"} % · Prognose aus `
+      + `${prognose.basis.volle_tage} vollen Tagen, Ø ${zahl(prognose.basis.mittel_kwh, 2)} kWh`
+      + (health.ok ? "" : ' · <span class="fehler">Sammler meldet sich nicht</span>')
+      + (health.last_error ? ` · <span class="fehler">${health.last_error}</span>` : "");
+
+    if (geraete.length) {
+      $("geraetekarte").hidden = false;
+      if (!geraete.some(g => g.device === zustand.geraet)) zustand.geraet = geraete[0].device;
+      knoepfe($("geraete"), geraete.map(g => [g.device, g.device]), zustand.geraet, (v) => zustand.geraet = v);
+      const g = geraete.find(x => x.device === zustand.geraet);
+      const tage = (g.last_ts - g.first_ts) / 86400;
+      $("geraetwerte").innerHTML = `aktuell <b>${zahl(g.power_w ?? 0, 1)} W</b>`
+        + ` · Zähler <b>${zahl(g.energy_wh ?? 0, 1)} Wh</b>`
+        + (tage > 0.5 ? ` · Ø <b>${zahl((g.energy_wh ?? 0) / (tage * 24), 1)} W</b> über ${zahl(tage, 1)} Tage` : "")
+        + (g.last_error ? ` · <span class="fehler">${g.last_error}</span>` : "");
+    } else {
+      $("geraetekarte").hidden = true;
+      zustand.geraet = null;
+    }
+
+    zeichneVerbrauch();
+    const verbrauch = zustand.verbrauch;
+    const zeilen = verbrauch
+      .map((e, i) => ({ e, stunden: zeitraumStunden(verbrauch, i) }))
+      .filter(z => z.e.kwh !== null).slice(-8).reverse();
+    $("tabelle").innerHTML =
+      "<tr><th>Zeitraum</th><th>kWh</th><th>Ø Leistung</th><th>Kosten</th></tr>"
+      + zeilen.map(({ e, stunden }) => {
+          const hinweis = e.partial_from_ts != null
+            ? ` <span style="color:var(--ink3)">ab ${abKuerzel(e.partial_from_ts)}</span>` : "";
+          return `<tr><td>${e.start}${hinweis}</td><td>${zahl(e.kwh, 2)}</td>`
+               + `<td>${zahl(e.kwh * 1000 / stunden)} W</td>`
+               + `<td>${zahl(e.kwh * zustand.preis, 2)} €</td></tr>`;
+        }).join("");
+
+    await zeichneVerlauf();
+  } catch (fehler) {
+    melden(fehler);
+  }
+}
+
+$("roll_verlauf").addEventListener("scroll", zeitGescrollt, { passive: true });
+$("roll_geraet").addEventListener("scroll", zeitGescrollt, { passive: true });
+$("roll_verbrauch").addEventListener("scroll", verbrauchGescrollt, { passive: true });
+addEventListener("resize", () => { zeitAbgleichen(); zeichneVerbrauch(); });
+$("jetzt").onclick = () => { zustand.ende = null; zeichneVerlauf().catch(melden); };
+$("neueste").onclick = () => { zustand.versatz = 0; zeichneVerbrauch(); };
+
+zeichne();
+setInterval(zeichne, 30000);
+</script>
+</body>
+</html>
