@@ -8,7 +8,8 @@ Der Stromzähler wird über den **FRITZ!Smart Energy 250** (optischer Lesekopf, 
 an der FRITZ!Box ausgelesen. Ein Raspberry Pi holt die Werte regelmäßig ab,
 speichert sie in SQLite und stellt sie im Heimnetz bereit:
 
-- **Weboberfläche**: Leistung, Verlauf, Verbrauch pro Tag/Monat, Grundlast, Prognose
+- **Weboberfläche**: Leistung, Verlauf, Verbrauch pro Tag/Monat, Grundlast, Prognose,
+  Tagestypen (wer war da?) und Strompreis mit Startdatum, beides dort korrigierbar
 - **Mac-App** in der Menüleiste: aktuelle Leistung, Diagramme
 - **Täglicher Bericht per Mail** plus Alarme, z. B. wenn die Grundlast einbricht
   (Gefrierschrank aus?) oder stundenlang etwas Großes läuft

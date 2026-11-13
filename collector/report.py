@@ -307,16 +307,28 @@ def build_report(conn, now: int, device: str, price: float,
     def kwh(v):
         return f"{v:.2f} kWh" if v is not None else "—"
 
-    def cost(v):
-        return f" ({v * price:.2f} €)" if v is not None and price else ""
+    # Der Preis, der am jeweiligen Tag galt (prices.py, auf der Webseite
+    # gepflegt). Geht dabei etwas schief: PRICE_PER_KWH — der Bericht ist der
+    # Herzschlag und darf am Preis nicht scheitern.
+    def preis_am(ts):
+        try:
+            import prices
+            return prices.preis_am(prices.lesen(labels_path, price),
+                                   datetime.fromtimestamp(ts).date())
+        except Exception:
+            return price
+
+    def cost(v, ts):
+        p = preis_am(ts) if v is not None else None
+        return f" ({v * p:.2f} €)" if p else ""
 
     yesterday = datetime.fromtimestamp(y_start).strftime("%d.%m.%Y")
     lines = [
         f"Energiebericht für {yesterday}",
         "",
-        f"  Gestern gesamt   {kwh(y_kwh)}{cost(y_kwh)}",
-        f"  Heute bisher     {kwh(t_kwh)}{cost(t_kwh)}",
-        f"  Kühlschrank      {kwh(f_kwh)}{cost(f_kwh)}",
+        f"  Gestern gesamt   {kwh(y_kwh)}{cost(y_kwh, y_start)}",
+        f"  Heute bisher     {kwh(t_kwh)}{cost(t_kwh, t_start)}",
+        f"  Kühlschrank      {kwh(f_kwh)}{cost(f_kwh, y_start)}",
         "",
         f"  Aktuell          {latest['power_w']:.0f} W"
         if latest else "  Aktuell          —",

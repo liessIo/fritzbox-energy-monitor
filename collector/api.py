@@ -3,9 +3,10 @@
 
 The measurement database is never written: its connection runs with PRAGMA
 query_only, so even a mistake cannot mutate it. The one exception to "read-only"
-is PUT /days/{tag} — the user's corrections of the detected day type. Those go
-to a separate file (labels.db), need their own key (LABEL_TOKEN), and cannot
-touch the measurements. Bucketing happens server-side so the Mac never pulls
+are PUT /days/{tag} and PUT /prices/{ab} — the user's corrections of the
+detected day type and the electricity price with its start date. Both go to a
+separate file (labels.db), need their own key (LABEL_TOKEN), and cannot touch
+the measurements. Bucketing happens server-side so the Mac never pulls
 raw rows.
 
 Usage:
@@ -26,6 +27,7 @@ from fastapi.responses import FileResponse
 
 import days
 import fritzbox
+import prices
 
 DEFAULT_DB = Path(__file__).resolve().parent / "data.db"
 WEB_DIR = Path(__file__).resolve().parent / "web"
@@ -41,6 +43,8 @@ API_TOKEN = CONFIG.get("API_TOKEN") or ""
 # ist das Schreiben abgeschaltet.
 LABELS_PATH = Path(CONFIG.get("LABELS_DB_PATH") or DB_PATH.with_name("labels.db"))
 LABEL_TOKEN = CONFIG.get("LABEL_TOKEN") or ""
+# Gilt von Anfang an, solange auf der Webseite kein eigener Preis eingetragen ist.
+GRUNDPREIS = float(CONFIG.get("PRICE_PER_KWH") or 0.30)
 
 app = FastAPI(title="FRITZ!Box Energy Monitor", version="3", docs_url=None,
               redoc_url=None, openapi_url=None)
@@ -92,6 +96,33 @@ def meta_value(conn: sqlite3.Connection, key: str) -> str | None:
     return row["value"] if row else None
 
 
+def preise_lesen() -> list[dict]:
+    return prices.lesen(LABELS_PATH, GRUNDPREIS)
+
+
+def kosten(conn: sqlite3.Connection, start: int, end: int, base_wh: float | None,
+           preise: list[dict]) -> float | None:
+    """Euro für den Verbrauch ab base_wh bis end. Der Zeitraum wird an jedem
+    Preiswechsel geteilt, jedes Stück aus Zählerdifferenzen mit seinem Preis —
+    ein Monat mit Tarifwechsel am 15. kostet so genau, was er gekostet hat."""
+    if base_wh is None:
+        return None
+    punkte = [start] + [ts for ts, _ in prices.wechsel_ts(preise)
+                        if start < ts < end] + [end]
+    euro, vorher = 0.0, base_wh
+    for a, b in zip(punkte, punkte[1:]):
+        row = conn.execute(
+            "SELECT energy_wh FROM counter_readings WHERE ts < ? "
+            "ORDER BY ts DESC LIMIT 1", (b,)).fetchone()
+        stand = max(row["energy_wh"], vorher) if row else vorher
+        preis = prices.preis_am(preise, datetime.fromtimestamp(a).astimezone().date())
+        if preis is None:
+            return None
+        euro += (stand - vorher) / 1000 * preis
+        vorher = stand
+    return round(euro, 2)
+
+
 def auto_bucket(span: int) -> int:
     """Pick a bucket that keeps the response at a few hundred points."""
     for limit, bucket in ((3600, 120), (86400, 300), (7 * 86400, 3600),
@@ -103,23 +134,23 @@ def auto_bucket(span: int) -> int:
 
 def period_starts(period: str, n: int) -> list[int]:
     """Local-time start of each of the last n days/months, oldest first."""
-    now = datetime.now().astimezone()
-    starts: list[datetime] = []
+    # Über Kalenderdaten gehen, nicht über datetime-Arithmetik: die behielt
+    # den UTC-Versatz von heute bei, und jenseits der Zeitumstellung begann
+    # jeder Tag und Monat um 1 Uhr statt um Mitternacht.
+    today = datetime.now().astimezone().date()
     if period == "day":
-        midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        for i in range(n):
-            starts.append(midnight - timedelta(days=i))
+        tage = [today - timedelta(days=i) for i in range(n)]
     else:
-        first = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        tage, jahr, monat = [], today.year, today.month
         for _ in range(n):
-            starts.append(first)
-            first = (first - timedelta(days=1)).replace(day=1)
-    # replace() keeps the old UTC offset across a DST change; normalise it
-    return sorted(int(s.astimezone().timestamp()) for s in starts)
+            tage.append(date(jahr, monat, 1))
+            jahr, monat = (jahr, monat - 1) if monat > 1 else (jahr - 1, 12)
+    return sorted(int(datetime.combine(t, datetime.min.time()).astimezone().timestamp())
+                  for t in tage)
 
 
 # --------------------------------------------------------------------------
-# routes — read-only, except PUT /days/{tag} (corrections, separate file)
+# routes — read-only, except PUT /days and /prices (labels.db, own key)
 # --------------------------------------------------------------------------
 
 @app.get("/", include_in_schema=False)
@@ -289,6 +320,7 @@ def consumption(
     """kWh per period from counter deltas — exact, immune to sampling gaps."""
     starts = period_starts(period, n)
     bounds = starts + [int(time.time()) + 1]
+    preise = preise_lesen()
     result = []
     for i, start in enumerate(starts):
         end = bounds[i + 1]
@@ -322,6 +354,9 @@ def consumption(
             "start": datetime.fromtimestamp(start, tz=timezone.utc)
                      .astimezone().strftime("%Y-%m-%d"),
             "kwh": kwh,
+            # Mit dem Preis, der damals galt — nicht mit dem heutigen.
+            "euro": kosten(conn, base["ts"] if partial_from else start, end,
+                           base["energy_wh"], preise) if kwh is not None else None,
             "counter_wh": last["energy_wh"] if last else None,
             # None = der Zeitraum ist vollstaendig abgedeckt.
             "partial_from_ts": partial_from,
@@ -341,7 +376,8 @@ def forecast(conn: sqlite3.Connection = Depends(db)) -> dict:
     stabil und läuft gegen Mitternacht auf den Istwert zu.
     """
     now = datetime.now().astimezone()
-    price = float(CONFIG.get("PRICE_PER_KWH") or 0.30)
+    preise = preise_lesen()
+    price = prices.preis_am(preise, now.date()) or 0.0
 
     rows = conn.execute(
         "SELECT date(ts,'unixepoch','localtime') AS tag, "
@@ -414,9 +450,14 @@ def forecast(conn: sqlite3.Connection = Depends(db)) -> dict:
             return None
         return max(0.0, latest["energy_wh"] - before["energy_wh"])
 
-    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    week_start = midnight - timedelta(days=now.weekday())
-    month_start = midnight.replace(day=1)
+    # Über Kalenderdaten, damit eine Zeitumstellung in der Woche oder im Monat
+    # den Beginn nicht um eine Stunde verschiebt.
+    def lokal(d: date) -> datetime:
+        return datetime.combine(d, datetime.min.time()).astimezone()
+
+    midnight = lokal(now.date())
+    week_start = lokal(now.date() - timedelta(days=now.weekday()))
+    month_start = lokal(now.date().replace(day=1))
 
     day_so_far = consumed_since(midnight)
     week_so_far = consumed_since(week_start)
@@ -427,7 +468,24 @@ def forecast(conn: sqlite3.Connection = Depends(db)) -> dict:
     days_in_month = calendar.monthrange(now.year, now.month)[1]
     days_left_month = days_in_month - now.day
 
-    def block(so_far: float | None, days_left: int, label: str) -> dict:
+    def euro(start: datetime, days_left: int) -> float | None:
+        """Bisheriges zum damaligen Preis, den Rest zum Preis seines Tages —
+        ein zum Monatsersten angekündigter Tarif zählt so schon mit."""
+        start_ts = int(start.timestamp())
+        before = conn.execute(
+            "SELECT energy_wh FROM counter_readings WHERE ts < ? "
+            "ORDER BY ts DESC LIMIT 1", (start_ts,)).fetchone()
+        bisher = kosten(conn, start_ts, int(time.time()) + 1,
+                        before["energy_wh"] if before else None, preise)
+        if bisher is None:
+            return None
+        rest = rest_today / 1000 * price + sum(
+            mean / 1000 * (prices.preis_am(preise, now.date() + timedelta(days=k)) or 0)
+            for k in range(1, days_left + 1))
+        return round(bisher + rest, 2)
+
+    def block(so_far: float | None, days_left: int, label: str,
+              start: datetime) -> dict:
         if so_far is None:
             return {"zeitraum": label, "ist_kwh": None, "prognose_kwh": None}
         projected = so_far + rest_today + mean * days_left
@@ -439,15 +497,15 @@ def forecast(conn: sqlite3.Connection = Depends(db)) -> dict:
             "prognose_kwh": round(projected / 1000, 2),
             "unten_kwh": round(max(so_far, projected - spread) / 1000, 2),
             "oben_kwh": round((projected + spread) / 1000, 2),
-            "prognose_euro": round(projected / 1000 * price, 2),
+            "prognose_euro": euro(start, days_left),
             "anteil_erledigt": round(
                 (so_far / projected) if projected > 0 else 0.0, 3),
         }
 
     return {
-        "tag": block(day_so_far, 0, "Tag"),
-        "woche": block(week_so_far, days_left_week, "Woche"),
-        "monat": block(month_so_far, days_left_month, "Monat"),
+        "tag": block(day_so_far, 0, "Tag", midnight),
+        "woche": block(week_so_far, days_left_week, "Woche", week_start),
+        "monat": block(month_so_far, days_left_month, "Monat", month_start),
         "basis": {
             "volle_tage": len(full_days),
             "vorbild_tage": len(vorbild),
@@ -483,6 +541,26 @@ def day_correct(tag: date, typ: str | None = Body(..., embed=True)) -> dict:
                             detail=f"typ muss einer von {', '.join(days.TYPEN)} sein")
     days.korrektur_setzen(LABELS_PATH, tag, typ)
     return {"tag": tag.isoformat(), "typ": typ}
+
+
+@app.get("/prices", dependencies=auth)
+def prices_route() -> dict:
+    """Alle Preise mit Startdatum, dazu der heute gültige."""
+    preise = preise_lesen()
+    return {"preise": preise, "anfang": prices.ANFANG,
+            "heute": prices.preis_am(preise, datetime.now().astimezone().date())}
+
+
+@app.put("/prices/{ab}", dependencies=[Depends(require_label_token)])
+def price_set(ab: str, euro_kwh: float | None = Body(..., embed=True)) -> dict:
+    """Preis ab einem Tag setzen (auch künftig), null löscht ihn. ab = ANFANG
+    ändert den Preis, der von Beginn der Aufzeichnung an gilt. Schreibt nur
+    labels.db."""
+    try:
+        prices.setzen(LABELS_PATH, ab, euro_kwh)
+    except ValueError as fehler:
+        raise HTTPException(status_code=400, detail=str(fehler)) from None
+    return {"ab": ab, "euro_kwh": euro_kwh}
 
 
 def load_stats(conn: sqlite3.Connection, table: str, where: str,

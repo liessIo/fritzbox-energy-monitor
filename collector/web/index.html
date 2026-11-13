@@ -132,6 +132,10 @@
   .editor input { font: inherit; font-size: 12.5px; padding: 5px 9px; border-radius: 8px;
                   border: 1px solid var(--rand); background: var(--flaeche); color: var(--ink);
                   width: 260px; max-width: 100%; }
+  .preise td:nth-child(3) { white-space: nowrap; }
+  .preise td button { padding: 3px 9px; margin-left: 4px; }
+  .editor input.kurz { width: 110px; }
+  .editor input[type=date] { width: 150px; }
   @media (max-width: 560px) { .tagzelle .kwh { display: none; } .tagzelle { min-height: 48px; } }
 </style>
 </head>
@@ -224,6 +228,14 @@
     <div class="fakten" id="tagewerte"></div>
   </div>
 
+  <div class="karte" id="preiskarte" hidden>
+    <h2>Strompreis</h2>
+    <div class="kachel"><div class="zahl" id="preis_heute">—</div>
+      <div class="unten" id="preis_unten">&nbsp;</div></div>
+    <table class="preise" id="preistabelle"></table>
+    <div class="editor" id="preiseditor"></div>
+  </div>
+
 </div>
 <script>
 const BEREICHE = [["1 h", 3600], ["6 h", 21600], ["24 h", 86400],
@@ -235,8 +247,8 @@ const FENSTER = { day: 21, month: 12 };
 // versatz: um wie viele Tage/Monate das Verbrauchsdiagramm zurückgeschoben ist.
 // deckel: 99-%-Wert der Leistung je Reihe, für die feste Skala beim Scrollen.
 const zustand = { bereich: 86400, ende: null, erster: 0, gezeichnet: 0, lauf: 0, gemalt: 0,
-                  geraet: null, periode: "day", versatz: 0, verbrauch: [], preis: 0.30, deckel: {},
-                  tageGeladen: 0, tagGewaehlt: null };
+                  geraet: null, periode: "day", versatz: 0, verbrauch: [], deckel: {},
+                  tageGeladen: 0, tagGewaehlt: null, preise: null, preisForm: null };
 // Linker und rechter Rand der Zeichenfläche, in viewBox-Einheiten.
 const L = 54, R = 14;
 const $ = (id) => document.getElementById(id);
@@ -406,7 +418,7 @@ function balken(svgId, tipId, eintraege, gipfel) {
     rect.onpointerenter = () => {
       const box = svg.getBoundingClientRect();
       tip.innerHTML = `<span class="zeit">${e.start}</span><b>${zahl(e.kwh, 2)} kWh</b>`
-        + ` <span style="color:var(--ink3)">${zahl(e.kwh * zustand.preis, 2)} €</span>`
+        + ` <span style="color:var(--ink3)">${e.euro != null ? zahl(e.euro, 2) + " €" : ""}</span>`
         + (teil ? `<span style="color:var(--ink3)"> · erst ab ${abKuerzel(e.partial_from_ts)}</span>` : "");
       tip.style.opacity = 1;
       const links = (px + breite / 2) / B * box.width;
@@ -692,15 +704,126 @@ async function korrigieren(t, typ) {
   await zeichneTage().catch(melden);
 }
 
+// Eingabe in Cent, weil Tarife so angegeben werden („34,12 ct/kWh“).
+const cent = (euro) => zahl(euro * 100, 2) + " ct";
+const abText = (ab) => ab === zustand.preise.anfang ? "von Beginn an"
+  : "ab " + new Date(ab + "T12:00:00").toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit", year: "numeric" });
+
+function zeichnePreise(meldung = "") {
+  const p = zustand.preise;
+  if (!p) return;
+  $("preiskarte").hidden = false;
+  const heute = new Date().toLocaleDateString("sv-SE");   // YYYY-MM-DD, Ortszeit
+  const kuenftig = p.preise.filter(e => e.ab > heute);
+  $("preis_heute").innerHTML = p.heute != null
+    ? `${zahl(p.heute * 100, 2)}<span class="einheit">ct/kWh</span>` : "—";
+  $("preis_unten").textContent = kuenftig.length
+    ? `gilt heute · ab ${abText(kuenftig[0].ab).slice(3)}: ${cent(kuenftig[0].euro_kwh)}/kWh`
+    : "gilt heute";
+  $("preistabelle").innerHTML = "<tr><th>Gültig</th><th>Preis je kWh</th><th></th></tr>";
+  for (const e of p.preise.slice().reverse()) {
+    const tr = document.createElement("tr");
+    const quelle = e.quelle === "fritzbox.env"
+      ? ' <span style="color:var(--ink3)">(Vorgabe aus fritzbox.env)</span>' : "";
+    tr.innerHTML = `<td>${abText(e.ab)}${quelle}</td><td>${cent(e.euro_kwh)}</td><td></td>`;
+    const aendern = document.createElement("button");
+    aendern.textContent = "Ändern";
+    aendern.onclick = () => { zustand.preisForm = { ab: e.ab, euro: e.euro_kwh }; zeichnePreise(); };
+    tr.lastChild.append(aendern);
+    if (e.quelle !== "fritzbox.env" && e.ab !== p.anfang) {
+      const weg = document.createElement("button");
+      weg.textContent = "Löschen";
+      weg.onclick = () => preisSpeichern(e.ab, null);
+      tr.lastChild.append(weg);
+    }
+    $("preistabelle").append(tr);
+  }
+
+  const ed = $("preiseditor");
+  ed.replaceChildren();
+  const reihe = document.createElement("div");
+  reihe.className = "reihe";
+  ed.innerHTML = `Ältere Zeiträume behalten ihren damaligen Preis. Ein neuer Tarif gilt ab seinem Tag.`
+    + (meldung ? ` · <span class="fehler">${meldung}</span>` : "");
+  if (!schluessel.lesen()) {
+    const feld = document.createElement("input");
+    feld.type = "password"; feld.placeholder = "Schlüssel (LABEL_TOKEN vom Pi)";
+    feld.autocomplete = "off";
+    const ok = document.createElement("button");
+    ok.textContent = "Speichern";
+    ok.onclick = () => { schluessel.setzen(feld.value.trim()); zeichnePreise(); };
+    feld.onkeydown = (ev) => { if (ev.key === "Enter") ok.onclick(); };
+    reihe.append(feld, ok);
+  } else if (zustand.preisForm === null) {
+    const neu = document.createElement("button");
+    neu.textContent = "Neuer Preis ab …";
+    neu.onclick = () => { zustand.preisForm = { ab: null, euro: p.heute }; zeichnePreise(); };
+    reihe.append(neu);
+  } else {
+    const f = zustand.preisForm;
+    let datum = null;
+    if (f.ab === null) {
+      datum = document.createElement("input");
+      datum.type = "date";
+      // Vorschlag: Monatserster des nächsten Monats, da wechseln Tarife meist.
+      const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() + 1);
+      datum.value = d.toLocaleDateString("sv-SE");
+      reihe.append("ab ", datum);
+    } else {
+      reihe.append(abText(f.ab) + ": ");
+    }
+    const betrag = document.createElement("input");
+    betrag.className = "kurz"; betrag.inputMode = "decimal";
+    betrag.value = f.euro != null ? zahl(f.euro * 100, 2) : "";
+    const ok = document.createElement("button");
+    ok.textContent = "Speichern";
+    ok.onclick = () => {
+      // „34,12“ und „34.12“ gehen beide; mit Komma sind Punkte Tausendertrenner.
+      const roh = betrag.value.trim();
+      const ct = Number(roh.includes(",") ? roh.replace(/\./g, "").replace(",", ".") : roh);
+      if (!(ct > 0 && ct < 500)) { zeichnePreise("Preis in Cent je kWh, z. B. 34,12"); return; }
+      if (datum && !datum.value) { zeichnePreise("Bitte ein Datum wählen"); return; }
+      preisSpeichern(f.ab ?? datum.value, ct / 100);
+    };
+    betrag.onkeydown = (ev) => { if (ev.key === "Enter") ok.onclick(); };
+    const ab = document.createElement("button");
+    ab.textContent = "Abbrechen";
+    ab.onclick = () => { zustand.preisForm = null; zeichnePreise(); };
+    reihe.append(betrag, " ct/kWh ", ok, ab);
+  }
+  ed.append(reihe);
+}
+
+async function preisSpeichern(ab, euro) {
+  const antwort = await fetch(new URL(`/prices/${ab}`, location.origin), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", "Authorization": "Bearer " + schluessel.lesen() },
+    body: JSON.stringify({ euro_kwh: euro }),
+  }).catch(() => null);
+  if (!antwort || !antwort.ok) {
+    if (antwort && antwort.status === 401) schluessel.setzen("");
+    const grund = !antwort ? "Pi nicht erreichbar"
+      : antwort.status === 401 ? "Schlüssel falsch — bitte neu eingeben"
+      : (await antwort.json().catch(() => ({}))).detail ?? "HTTP " + antwort.status;
+    zeichnePreise(grund);
+    return;
+  }
+  zustand.preisForm = null;
+  await zeichne();   // Kosten und Prognose mit dem neuen Preis
+}
+
 async function zeichne() {
   knoepfe($("bereiche"), BEREICHE, zustand.bereich, (v) => zustand.bereich = v);
   knoepfe($("perioden"), [["Tage", "day"], ["Monate", "month"]], zustand.periode,
           (v) => { zustand.periode = v; zustand.versatz = 0; });
   try {
-    const [jetzt, health, , geraete, prognose] = await Promise.all([
+    const [jetzt, health, , geraete, prognose, preise] = await Promise.all([
       api("/latest"), api("/health"), verbrauchLaden(), api("/devices"), api("/forecast"),
+      api("/prices"),
     ]);
-    zustand.preis = prognose.basis.preis_pro_kwh;
+    zustand.preise = preise;
+    // Nicht neu zeichnen, während jemand tippt — der 30-s-Takt löscht sonst die Eingabe.
+    if (zustand.preisForm === null) zeichnePreise();
     zustand.erster = health.first_ts ?? 0;
 
     $("k_jetzt").innerHTML = `${zahl(jetzt.power_w)}<span class="einheit">W</span>`;
@@ -748,7 +871,7 @@ async function zeichne() {
             ? ` <span style="color:var(--ink3)">ab ${abKuerzel(e.partial_from_ts)}</span>` : "";
           return `<tr><td>${e.start}${hinweis}</td><td>${zahl(e.kwh, 2)}</td>`
                + `<td>${zahl(e.kwh * 1000 / stunden)} W</td>`
-               + `<td>${zahl(e.kwh * zustand.preis, 2)} €</td></tr>`;
+               + `<td>${e.euro != null ? zahl(e.euro, 2) + " €" : "—"}</td></tr>`;
         }).join("");
 
     // Die Tage ändern sich langsam und kosten den Pi knapp eine Sekunde:
