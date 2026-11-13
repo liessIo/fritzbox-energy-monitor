@@ -31,6 +31,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 CONFIG_FILE = HERE / "fritzbox.env"
 DEFAULT_DB = HERE / "data.db"
+DEFAULT_LABELS = HERE / "labels.db"
 STATE_FILE = HERE / "report-state.json"
 
 # Schwellen, kalibriert an sieben Tagen Realbetrieb (2026-08-29..09-05):
@@ -51,6 +52,21 @@ ALERT_REPEAT_H = 12
 # alt, klafft eine Luecke — bei der Messsteckdose etwa, weil sie zwischenzeitlich
 # an einem anderen Geraet hing. Die Differenz waere dann frei erfunden.
 MAX_BASE_GAP_S = 3600
+
+# Auffaelligkeiten gegen den Tagestyp (days.py), nur im Tagesbericht, kein
+# Alarm. Kalibriert an 88 vollen Tagen (Aug.–Nov. 2026):
+# - Nacht-Grundlast wich hoechstens 10 W vom 28-Tage-Median ab.
+# - Tagesverbrauch ueber dem Ueblichen seines Typs: 3 Tage ueber 2,5 sigma,
+#   alle echte Ausreisser (Waesche nach dem Urlaub, ein Sonntag mit 8,5 kWh).
+# - An Abwesenheitstagen lag die Dauerlast tagsueber nie mehr als 3 W ueber
+#   der Nacht.
+NIGHT_RISE_W = 20.0
+DAY_HIGH_SIGMA = 2.5
+DAY_HIGH_MIN_KWH = 1.5      # sonst schlaegt es bei kleiner Streuung zu leicht an
+AWAY_DAYLOAD_W = 30.0
+SAME_TYPE_MIN_DAYS = 5      # weniger Vergleichstage: kein Urteil
+TYPE_NAMES = {"weg": "alle weg", "homeoffice": "Homeoffice",
+              "unterwegs": "unterwegs", "zuhause": "zuhause"}
 
 
 # --------------------------------------------------------------------------
@@ -206,10 +222,70 @@ def check_alerts(conn, now: int, device: str) -> dict[str, str]:
 
 
 # --------------------------------------------------------------------------
+# Auffaelligkeiten gegen den Tagestyp
+# --------------------------------------------------------------------------
+
+def day_findings(conn, labels_path: Path) -> tuple[str | None, list[str]]:
+    """→ (Zeile zum Tagestyp von gestern, Liste von Auffaelligkeiten).
+
+    Stuetzt sich auf days.py und deine Korrekturen in labels.db. Der Aufrufer
+    faengt jeden Fehler ab: der Bericht ist der Herzschlag und muss auch dann
+    rausgehen, wenn hier etwas kaputt ist.
+    """
+    import statistics
+
+    import days
+
+    gestern = (datetime.now() - timedelta(days=1)).date()
+    liste = days.tage(conn, 61, heute=gestern + timedelta(days=1),
+                      korrekturen=days.korrekturen_lesen(labels_path))
+    y = next((t for t in liste if t["tag"] == gestern.isoformat()), None)
+    if y is None or y["typ"] is None:
+        return None, []
+    vorher = [t for t in liste if t["tag"] < y["tag"] and t["kwh"] is not None
+              and t["proben"] >= days.MIN_PROBEN]
+
+    herkunft = ("von dir korrigiert" if y["korrigiert"]
+                else "erkannt" if y["sicher"] else "erkannt, unsicher")
+    typ_text = f"{TYPE_NAMES[y['typ']]} ({herkunft})"
+    funde: list[str] = []
+
+    gleiche = [t["kwh"] for t in vorher if t["typ"] == y["typ"]][-30:]
+    if len(gleiche) >= SAME_TYPE_MIN_DAYS:
+        mittel, sigma = statistics.mean(gleiche), statistics.pstdev(gleiche)
+        typ_text += f", üblich {mittel:.1f} kWh"
+        if y["kwh"] is not None and y["kwh"] > mittel + max(
+                DAY_HIGH_SIGMA * sigma, DAY_HIGH_MIN_KWH):
+            funde.append(
+                f"Gestern {y['kwh']:.1f} kWh — für einen Tag „{TYPE_NAMES[y['typ']]}“ "
+                f"sind {mittel:.1f} ± {sigma:.1f} kWh üblich "
+                f"({len(gleiche)} Vergleichstage).")
+
+    naechte = [t["nacht_w"] for t in vorher[-28:] if t["nacht_w"] is not None]
+    if y["nacht_w"] is not None and len(naechte) >= 7:
+        median = statistics.median(naechte)
+        if y["nacht_w"] - median > NIGHT_RISE_W:
+            funde.append(
+                f"Die Grundlast in der Nacht lag bei {y['nacht_w']:.0f} W, sonst "
+                f"{median:.0f} W. Da läuft seit Neuestem etwas dauerhaft mit "
+                f"(+{y['nacht_w'] - median:.0f} W).")
+
+    if (y["typ"] == "weg" and y["tag_w"] is not None and y["nacht_w"] is not None
+            and y["tag_w"] - y["nacht_w"] > AWAY_DAYLOAD_W):
+        funde.append(
+            f"Niemand war da, aber tagsüber lief eine Dauerlast von "
+            f"{y['tag_w'] - y['nacht_w']:.0f} W über der Nacht. "
+            f"Etwas angelassen?")
+
+    return typ_text, funde
+
+
+# --------------------------------------------------------------------------
 # Bericht
 # --------------------------------------------------------------------------
 
-def build_report(conn, now: int, device: str, price: float) -> tuple[str, str]:
+def build_report(conn, now: int, device: str, price: float,
+                 labels_path: Path = DEFAULT_LABELS) -> tuple[str, str]:
     y_start, t_start = day_start(1), day_start(0)
     y_kwh = counter_kwh(conn, y_start, t_start)
     t_kwh = counter_kwh(conn, t_start, now + 1)
@@ -251,6 +327,16 @@ def build_report(conn, now: int, device: str, price: float) -> tuple[str, str]:
         f"  Kühlschrank taktete in {cycles['n']} der letzten 24 Stunden",
     ]
     subject = f"Energiebericht {yesterday}: {kwh(y_kwh)}"
+
+    try:
+        typ_text, funde = day_findings(conn, labels_path)
+    except Exception as fehler:  # Herzschlag geht vor
+        typ_text, funde = None, [f"(Prüfung auf Auffälligkeiten fehlgeschlagen: {fehler})"]
+    if typ_text:
+        lines.insert(2, f"  Tagestyp         {typ_text}")
+    if funde:
+        lines += ["", "Auffällig:"] + [f"  - {f}" for f in funde]
+        subject += f" · {len(funde)} Auffälligkeit" + ("en" if len(funde) > 1 else "")
     return subject, "\n".join(lines)
 
 
@@ -336,7 +422,8 @@ def main() -> None:
     last_report = state.get("last_report", 0)
     due = datetime.now().hour >= report_hour and now - last_report > 20 * 3600
     if force or due:
-        subject, body = build_report(conn, now, device, price)
+        subject, body = build_report(conn, now, device, price,
+                                     Path(config.get("LABELS_DB_PATH") or DEFAULT_LABELS))
         if alerts:
             body += "\n\nOffene Alarme:\n" + "\n".join(
                 f"  - {t}" for t in alerts.values())

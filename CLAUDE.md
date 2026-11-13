@@ -72,6 +72,13 @@ an hour older than the window (`MAX_BASE_GAP_S`): when the plug moves to another
 appliance its counter keeps running, and the difference across that gap would be
 pure fiction — this produced a 2.29 kWh "fridge" reading on the first dry run.
 
+**Findings against the day type** (`day_findings` in `report.py`, since 2026-11-13)
+go into the daily report only, never as alerts: yesterday's kWh far above its
+type's usual (2.5 σ and ≥ 1.5 kWh), night standing load +20 W over the 28-day
+median, and an away day with +30 W daytime load. Calibrated on 88 days — only
+three genuine outlier days tripped the first, the others never. The whole check
+is wrapped in `try`: a bug there must not stop the heartbeat mail.
+
 ## Non-negotiables
 - **Read-only** end to end. Only `getdevicelistinfos` and `getbasicdevicestats`. No switch commands,
   no write/mutate API routes — with the one exception under "Deliberate departures"
