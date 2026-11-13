@@ -31,6 +31,8 @@ DEFAULT_DB = Path(__file__).resolve().parent / "data.db"
 WEB_DIR = Path(__file__).resolve().parent / "web"
 MAX_POINTS = 2000     # hard ceiling on /history response size
 STALE_AFTER_S = 600   # five missed live cycles → not ok
+FORECAST_DAYS = 60    # Vorbildtage der Prognose; ältere wiegen ohnehin < 15 %
+FORECAST_HALF_LIFE_DAYS = 21
 
 CONFIG = fritzbox.load_config()
 DB_PATH = Path(CONFIG.get("DB_PATH") or DEFAULT_DB)
@@ -358,27 +360,48 @@ def forecast(conn: sqlite3.Connection = Depends(db)) -> dict:
         per_hour.setdefault(tag, {})[row["stunde"]] = row["wh"] or 0.0
 
     today = now.strftime("%Y-%m-%d")
+    yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
     full_days = sorted(d for d, (t0, t1) in spans.items()
                        if d != today and t1 - t0 > 23.5 * 3600)
-    totals = [per_day[d] for d in full_days]
 
-    # Stundenprofil: Anteil jeder Stunde am Tagesverbrauch, über alle vollen Tage.
-    if len(full_days) >= 2:
+    # Welche Tage taugen als Vorbild? Rückgerechnet an 32 bewohnten Tagen
+    # (Okt./Nov. 2026): Abwesenheitstage mitzumitteln drückte die Prognose um
+    # 1,7 kWh je Tag nach unten; ohne sie bleibt 0,3 kWh, und mit stärker
+    # gewichteten neueren Tagen (Halbwertszeit 21 Tage) verschwindet auch das —
+    # der Verbrauch steigt zum Winter hin. Wochentag und Tagestyp brachten für
+    # die Tagessumme nichts; die übrigen ~1,2 kWh Streuung sind Zufall.
+    typen = {t["tag"]: t["typ"] for t in days.tage(
+        conn, FORECAST_DAYS, korrekturen=days.korrekturen_lesen(LABELS_PATH))}
+    bewohnt = [d for d in full_days if d in typen and typen[d] != "weg"]
+    weg = [d for d in full_days if typen.get(d) == "weg"]
+    # Gestern und heute weg: dann geht es vermutlich so weiter (Urlaub).
+    abwesend = typen.get(today) == "weg" and typen.get(yesterday) == "weg" and bool(weg)
+    vorbild = (weg if abwesend else bewohnt) or full_days
+
+    def gewicht(d: str) -> float:
+        alter = (now.date() - date.fromisoformat(d)).days
+        return 0.5 ** (alter / FORECAST_HALF_LIFE_DAYS)
+
+    gewichte = {d: gewicht(d) for d in vorbild}
+    summe = sum(gewichte.values())
+
+    # Stundenprofil: Anteil jeder Stunde am Tagesverbrauch, über die Vorbildtage.
+    if len(vorbild) >= 2:
         profile = [0.0] * 24
-        for d in full_days:
+        for d in vorbild:
             gesamt = per_day[d] or 1.0
             for hour in range(24):
-                profile[hour] += per_hour[d].get(hour, 0.0) / gesamt
-        profile = [p / len(full_days) for p in profile]
+                profile[hour] += gewichte[d] * per_hour[d].get(hour, 0.0) / gesamt
+        profile = [p / summe for p in profile]
     else:
         profile = [1 / 24] * 24  # ohne Historie: gleichmäßig verteilt
 
     elapsed = sum(profile[:now.hour]) + profile[now.hour] * (now.minute / 60)
     elapsed = min(max(elapsed, 0.0), 1.0)
 
-    mean = sum(totals) / len(totals) if totals else 0.0
-    sigma = ((sum((x - mean) ** 2 for x in totals) / len(totals)) ** 0.5
-             if len(totals) > 1 else 0.0)
+    mean = sum(gewichte[d] * per_day[d] for d in vorbild) / summe if vorbild else 0.0
+    sigma = ((sum(gewichte[d] * (per_day[d] - mean) ** 2 for d in vorbild) / summe) ** 0.5
+             if len(vorbild) > 1 else 0.0)
 
     def consumed_since(start: datetime) -> float | None:
         start_ts = int(start.timestamp())
@@ -427,6 +450,10 @@ def forecast(conn: sqlite3.Connection = Depends(db)) -> dict:
         "monat": block(month_so_far, days_left_month, "Monat"),
         "basis": {
             "volle_tage": len(full_days),
+            "vorbild_tage": len(vorbild),
+            "weg_ausgelassen": 0 if abwesend else len(weg),
+            "abwesend": abwesend,
+            "halbwertszeit_tage": FORECAST_HALF_LIFE_DAYS,
             "mittel_kwh": round(mean / 1000, 2),
             "streuung_kwh": round(sigma / 1000, 2),
             "tagesanteil_verstrichen": round(elapsed, 3),

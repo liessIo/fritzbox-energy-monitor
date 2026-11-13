@@ -125,7 +125,13 @@ def tage(conn: sqlite3.Connection, n: int, heute: date | None = None,
     """
     heute = heute or datetime.now().astimezone().date()
     erster = heute - timedelta(days=n - 1)
-    von, bis = _grenze(erster), _grenze(heute + timedelta(days=1))
+    # Tage vor gestern sind abgeschlossen: die Ernte überlappt nur die letzte
+    # Stunde. Ihre Merkmale ändern sich nicht mehr und kommen aus dem Speicher.
+    abgeschlossen_bis = heute - timedelta(days=1)
+    offen = [erster + timedelta(days=i) for i in range(n)
+             if erster + timedelta(days=i) not in _MERKMALE]
+    von = _grenze(min(offen)) if offen else _grenze(heute)
+    bis = _grenze(heute + timedelta(days=1))
 
     # Ortszeit rechnet SQLite um, das ist auf dem Pi ein Vielfaches schneller
     # als datetime je Messwert.
@@ -139,32 +145,14 @@ def tage(conn: sqlite3.Connection, n: int, heute: date | None = None,
     ergebnis = []
     for i in range(n):
         tag = erster + timedelta(days=i)
-        reihe = proben.get(tag, [])
-        if not reihe:
+        if tag in _MERKMALE:
+            merkmale = _MERKMALE[tag]
+        else:
+            merkmale = _merkmale(conn, tag, proben.get(tag, []))
+            if tag < abgeschlossen_bis:
+                _MERKMALE[tag] = merkmale
+        if merkmale is None:
             continue
-        start, ende = _grenze(tag), _grenze(tag + timedelta(days=1))
-
-        # Zählerdifferenz wie in /consumption, aber nur, wenn der Basisstand
-        # unmittelbar vor Mitternacht liegt — sonst wäre es eine Lücke.
-        kwh = None
-        basis, letzter = _zaehler_vor(conn, start), _zaehler_vor(conn, ende)
-        if basis and letzter and start - basis[0] < 3600 and letzter[0] >= start:
-            kwh = round((letzter[1] - basis[1]) / 1000, 3)
-
-        spitzen, vorher = 0, False
-        for stunde, p in reihe:
-            hoch = p > SPITZE_W and 6 <= stunde < 23
-            spitzen += hoch and not vorher
-            vorher = hoch
-
-        merkmale = {
-            "kwh": kwh,
-            "proben": len(reihe),
-            "nacht_w": _quantil([p for s, p in reihe if 1 <= s < 5], .1),
-            "tag_w": _quantil([p for s, p in reihe if 9 <= s < 17], .1),
-            "abend_w": _quantil([p for s, p in reihe if 18 <= s < 23], .5),
-            "spitzen": spitzen,
-        }
         typ, sicher, grund = einordnen(merkmale, tag)
         if tag == heute:
             sicher = False
@@ -182,6 +170,40 @@ def tage(conn: sqlite3.Connection, n: int, heute: date | None = None,
                            korrigiert=True)
         ergebnis.append(eintrag)
     return ergebnis
+
+
+# Merkmale abgeschlossener Tage, je API-Prozess. None = Tag ohne Messwerte.
+_MERKMALE: dict[date, dict | None] = {}
+
+
+def _merkmale(conn: sqlite3.Connection, tag: date,
+              reihe: list[tuple[int, float]]) -> dict | None:
+    """Merkmale eines Tages aus seinen Messwerten (Stunde, Watt); None ohne Werte."""
+    if not reihe:
+        return None
+    start, ende = _grenze(tag), _grenze(tag + timedelta(days=1))
+
+    # Zählerdifferenz wie in /consumption, aber nur, wenn der Basisstand
+    # unmittelbar vor Mitternacht liegt — sonst wäre es eine Lücke.
+    kwh = None
+    basis, letzter = _zaehler_vor(conn, start), _zaehler_vor(conn, ende)
+    if basis and letzter and start - basis[0] < 3600 and letzter[0] >= start:
+        kwh = round((letzter[1] - basis[1]) / 1000, 3)
+
+    spitzen, vorher = 0, False
+    for stunde, p in reihe:
+        hoch = p > SPITZE_W and 6 <= stunde < 23
+        spitzen += hoch and not vorher
+        vorher = hoch
+
+    return {
+        "kwh": kwh,
+        "proben": len(reihe),
+        "nacht_w": _quantil([p for s, p in reihe if 1 <= s < 5], .1),
+        "tag_w": _quantil([p for s, p in reihe if 9 <= s < 17], .1),
+        "abend_w": _quantil([p for s, p in reihe if 18 <= s < 23], .5),
+        "spitzen": spitzen,
+    }
 
 
 # --------------------------------------------------------------------------

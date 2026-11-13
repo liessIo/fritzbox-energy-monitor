@@ -713,7 +713,11 @@ async function zeichne() {
     const alter = Math.round(Date.now() / 1000 - jetzt.ts);
     $("status").innerHTML =
       `Messung vor ${alter} s · Batterie ${health.battery ?? "?"} % · Prognose aus `
-      + `${prognose.basis.volle_tage} vollen Tagen, Ø ${zahl(prognose.basis.mittel_kwh, 2)} kWh`
+      + (prognose.basis.abwesend
+          ? `Abwesenheit: ${prognose.basis.vorbild_tage} Tagen ohne jemanden zuhause`
+          : `${prognose.basis.vorbild_tage} bewohnten Tagen`
+            + (prognose.basis.weg_ausgelassen ? ` (${prognose.basis.weg_ausgelassen} Tage weg ausgelassen)` : ""))
+      + `, neuere zählen mehr, Ø ${zahl(prognose.basis.mittel_kwh, 2)} kWh`
       + (health.ok ? "" : ' · <span class="fehler">Sammler meldet sich nicht</span>')
       + (health.last_error ? ` · <span class="fehler">${health.last_error}</span>` : "");
 
