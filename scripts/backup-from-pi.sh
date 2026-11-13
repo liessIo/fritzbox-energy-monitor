@@ -35,14 +35,32 @@ if [[ "$CHECK" != "ok" ]]; then
     exit 1
 fi
 
+# Deine Korrekturen der Tagestypen liegen in einer eigenen Datei. Klein, aber
+# nicht wiederherstellbar — also mitsichern, sofern es sie schon gibt.
+LABELS_TARGET="$DEST/labels-$STAMP.db"
+if ssh -o BatchMode=yes "$PI" "test -f ~/energiepi/labels.db"; then
+    ssh -o BatchMode=yes "$PI" \
+        "rm -f '$SNAPSHOT' && sqlite3 ~/energiepi/labels.db \"VACUUM INTO '$SNAPSHOT'\""
+    scp -q "$PI:$SNAPSHOT" "$LABELS_TARGET"
+    ssh -o BatchMode=yes "$PI" "rm -f '$SNAPSHOT'"
+    CHECK="$(sqlite3 "$LABELS_TARGET" 'PRAGMA integrity_check;' 2>&1 | head -1)"
+    if [[ "$CHECK" != "ok" ]]; then
+        echo "FEHLER: Sicherung der Korrekturen ist beschädigt: $CHECK" >&2
+        exit 1
+    fi
+fi
+
 SAMPLES="$(sqlite3 "$TARGET" 'SELECT COUNT(*) FROM power_samples;')"
 NEWEST="$(sqlite3 "$TARGET" "SELECT datetime(MAX(ts),'unixepoch','localtime') FROM power_samples;")"
 
 # Rotation: die ältesten über KEEP hinaus entfernen.
-ls -1t "$DEST"/data-*.db 2>/dev/null | tail -n "+$((KEEP + 1))" | while read -r old; do
-    rm -f "$old"
-    echo "entfernt: $(basename "$old")"
+for muster in data labels; do
+    ls -1t "$DEST"/$muster-*.db 2>/dev/null | tail -n "+$((KEEP + 1))" | while read -r old; do
+        rm -f "$old"
+        echo "entfernt: $(basename "$old")"
+    done
 done
 
 echo "gesichert: $TARGET"
 echo "  $(du -h "$TARGET" | cut -f1), $SAMPLES Messwerte, neuester $NEWEST"
+[[ -f "$LABELS_TARGET" ]] && echo "  Korrekturen: $(sqlite3 "$LABELS_TARGET" 'SELECT COUNT(*) FROM day_labels;') Tage"

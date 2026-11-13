@@ -117,6 +117,13 @@ kopieren, `PFAD_ZUR_APP` ersetzen, `launchctl load` darauf.
 eintragen (`PI=pi@raspberrypi.local`), wöchentlich per
 `scripts/local.energymonitor.backup.plist`.
 
+**Skript und `backup.env` nicht aus `~/Documents` (oder Desktop/Downloads)
+starten lassen:** macOS sperrt diese Ordner für launchd-Jobs, der Job endet
+dann stumm mit Exit-Code 126. Beide Dateien nach
+`~/Library/Application Support/EnergyMonitor/` kopieren und den Pfad im plist
+dorthin setzen; das Log nach `~/Library/Logs/EnergyMonitor/backup.log`, denn
+`/tmp` wird beim Neustart geleert. Nach Änderungen am Skript erneut kopieren.
+
 ## Was man über den Lesekopf wissen sollte
 
 Alles am echten Gerät gemessen; ausführlich in

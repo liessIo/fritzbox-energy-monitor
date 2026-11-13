@@ -108,6 +108,31 @@
   td { text-align: right; padding: 5px 8px; border-bottom: 1px solid var(--gitter); }
   th:first-child, td:first-child { text-align: left; }
   tr:last-child td { border-bottom: none; }
+  /* Tageskalender: eine Zeile je Woche, Montag zuerst. */
+  .kalender { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; }
+  .kalender .kopf { font-size: 11.5px; color: var(--ink3); text-align: center; }
+  .tagzelle { border-radius: 9px; padding: 6px 7px; min-height: 58px; font-size: 11.5px;
+              border: 1px solid transparent; color: var(--ink); line-height: 1.3; }
+  .tagzelle .datum { color: var(--ink3); }
+  .tagzelle .typ { font-weight: 600; font-size: 12px; overflow: hidden; text-overflow: ellipsis;
+                   white-space: nowrap; }
+  .tagzelle.homeoffice { background: color-mix(in srgb, var(--serie1) 18%, transparent); }
+  .tagzelle.zuhause    { background: color-mix(in srgb, var(--serie3) 18%, transparent); }
+  .tagzelle.unterwegs  { background: var(--gitter); }
+  .tagzelle.weg        { border: 1px dashed var(--ink3); }
+  .tagzelle.offen      { border: 1px dashed var(--rand); }
+  .tagzelle.unsicher .typ::after { content: " ?"; color: var(--kritisch); }
+  .tagzelle.laufend    { outline: 2px solid var(--ink3); outline-offset: -2px; }
+  .tagzelle.korrigiert .typ::after { content: " ✓"; color: var(--ink3); font-weight: 400; }
+  .tagzelle { cursor: pointer; }
+  .tagzelle.gewaehlt   { outline: 2px solid var(--ink); outline-offset: -2px; }
+  .editor { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--rand);
+            font-size: 12.5px; color: var(--ink2); }
+  .editor .reihe { margin: 8px 0 0; }
+  .editor input { font: inherit; font-size: 12.5px; padding: 5px 9px; border-radius: 8px;
+                  border: 1px solid var(--rand); background: var(--flaeche); color: var(--ink);
+                  width: 260px; max-width: 100%; }
+  @media (max-width: 560px) { .tagzelle .kwh { display: none; } .tagzelle { min-height: 48px; } }
 </style>
 </head>
 <body>
@@ -192,6 +217,13 @@
     <table id="tabelle"></table>
   </div>
 
+  <div class="karte" id="tagekarte" hidden>
+    <h2>Tage — wer war da?</h2>
+    <div class="kalender" id="kalender"></div>
+    <div class="editor" id="tageditor" hidden></div>
+    <div class="fakten" id="tagewerte"></div>
+  </div>
+
 </div>
 <script>
 const BEREICHE = [["1 h", 3600], ["6 h", 21600], ["24 h", 86400],
@@ -203,7 +235,8 @@ const FENSTER = { day: 21, month: 12 };
 // versatz: um wie viele Tage/Monate das Verbrauchsdiagramm zurückgeschoben ist.
 // deckel: 99-%-Wert der Leistung je Reihe, für die feste Skala beim Scrollen.
 const zustand = { bereich: 86400, ende: null, erster: 0, gezeichnet: 0, lauf: 0, gemalt: 0,
-                  geraet: null, periode: "day", versatz: 0, verbrauch: [], preis: 0.30, deckel: {} };
+                  geraet: null, periode: "day", versatz: 0, verbrauch: [], preis: 0.30, deckel: {},
+                  tageGeladen: 0, tagGewaehlt: null };
 // Linker und rechter Rand der Zeichenfläche, in viewBox-Einheiten.
 const L = 54, R = 14;
 const $ = (id) => document.getElementById(id);
@@ -547,6 +580,118 @@ function verbrauchGescrollt(ev) {
   zeichneVerbrauch(ev.currentTarget);
 }
 
+const TYPNAMEN = { weg: "alle weg", homeoffice: "Homeoffice", unterwegs: "unterwegs",
+                   zuhause: "zuhause" };
+
+/** Erkannte Tagestypen als Kalender, Montag links. Eine Vermutung aus dem
+    Lastverlauf — mit „?“ markiert, wo die Merkmale nicht eindeutig sind. */
+async function zeichneTage(vorhanden = null) {
+  const liste = vorhanden ?? await api("/days", { n: 42 });
+  const k = $("kalender");
+  k.replaceChildren();
+  for (const n of ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]) {
+    const d = document.createElement("div"); d.className = "kopf"; d.textContent = n; k.append(d);
+  }
+  if (liste.length) for (let i = 0; i < liste[0].wochentag; i++) k.append(document.createElement("div"));
+  const zahlen = {};
+  for (const t of liste) {
+    const z = document.createElement("div");
+    const typ = t.typ ?? "offen";
+    z.className = `tagzelle ${typ}` + (t.sicher || !t.typ ? "" : " unsicher")
+      + (t.laufend ? " laufend" : "") + (t.korrigiert ? " korrigiert" : "")
+      + (t.tag === zustand.tagGewaehlt ? " gewaehlt" : "");
+    z.onclick = () => { zustand.tagGewaehlt = t.tag; zeichneTage(liste); };
+    const [, m, d] = t.tag.split("-");
+    z.innerHTML = `<div class="datum">${Number(d)}.${Number(m)}.</div>`
+      + `<div class="typ">${t.typ ? TYPNAMEN[t.typ] : "offen"}</div>`
+      + `<div class="kwh">${t.kwh != null ? zahl(t.kwh, 1) + " kWh" : "&nbsp;"}</div>`;
+    z.title = t.korrigiert
+      ? `von dir korrigiert — erkannt war: ${t.erkannt ? TYPNAMEN[t.erkannt] : "offen"}`
+      : t.grund + (t.sicher ? "" : " — nicht sicher");
+    k.append(z);
+    if (t.typ && !t.laufend) zahlen[t.typ] = (zahlen[t.typ] ?? 0) + 1;
+  }
+  const unsicher = liste.filter(t => t.typ && !t.sicher && !t.laufend).length;
+  $("tagewerte").innerHTML = Object.entries(zahlen)
+      .map(([typ, n]) => `${TYPNAMEN[typ]} <b>${n}</b>`).join(" · ")
+    + (unsicher ? ` · <span class="fehler">${unsicher} unsicher</span>` : "")
+    + ` · erkannt aus dem Lastverlauf, ✓ = von dir korrigiert, Klick auf einen Tag zum Ändern`;
+  $("tagekarte").hidden = false;
+  zeichneEditor(liste.find(t => t.tag === zustand.tagGewaehlt));
+}
+
+// Schlüssel für Korrekturen: nur in diesem Browser gespeichert. Ohne Speicher
+// (privates Fenster) muss er eben je Sitzung neu eingegeben werden.
+const schluessel = {
+  lesen() { try { return localStorage.getItem("korrekturSchluessel") || ""; } catch { return ""; } },
+  setzen(v) { try { v ? localStorage.setItem("korrekturSchluessel", v)
+                      : localStorage.removeItem("korrekturSchluessel"); } catch {} },
+};
+
+function zeichneEditor(t, meldung = "") {
+  const ed = $("tageditor");
+  if (!t) { ed.hidden = true; return; }
+  ed.hidden = false;
+  const d = new Date(t.tag + "T12:00:00");
+  const kopf = d.toLocaleDateString("de-DE", { weekday: "long", day: "2-digit", month: "2-digit" });
+  const erkannt = t.erkannt ? TYPNAMEN[t.erkannt] : "offen";
+  ed.innerHTML = `<b style="color:var(--ink)">${kopf}</b> · erkannt: ${erkannt}`
+    + (t.korrigiert ? ` · <b style="color:var(--ink)">korrigiert: ${TYPNAMEN[t.typ]}</b>` : "")
+    + ` <span style="color:var(--ink3)">(${t.grund})</span>`
+    + (meldung ? ` · <span class="fehler">${meldung}</span>` : "");
+  const reihe = document.createElement("div");
+  reihe.className = "reihe";
+  if (!schluessel.lesen()) {
+    const feld = document.createElement("input");
+    feld.type = "password"; feld.placeholder = "Schlüssel (LABEL_TOKEN vom Pi)";
+    feld.autocomplete = "off";
+    const ok = document.createElement("button");
+    ok.textContent = "Speichern";
+    ok.onclick = () => { schluessel.setzen(feld.value.trim()); zeichneEditor(t); };
+    feld.onkeydown = (ev) => { if (ev.key === "Enter") ok.onclick(); };
+    reihe.append(feld, ok);
+  } else {
+    for (const typ of Object.keys(TYPNAMEN)) {
+      const b = document.createElement("button");
+      b.textContent = TYPNAMEN[typ];
+      // Vorbelegt, sobald der Typ feststeht: korrigiert oder sicher erkannt.
+      // Bei „?“ bleibt alles offen, damit keine Vermutung wie eine Antwort aussieht.
+      if (t.sicher && t.typ === typ) b.className = "an";
+      b.onclick = () => korrigieren(t, typ);
+      reihe.append(b);
+    }
+    if (t.korrigiert) {
+      const zurueck = document.createElement("button");
+      zurueck.textContent = "Korrektur entfernen";
+      zurueck.onclick = () => korrigieren(t, null);
+      reihe.append(zurueck);
+    }
+    const zu = document.createElement("button");
+    zu.textContent = "Schließen";
+    zu.onclick = () => { zustand.tagGewaehlt = null; zeichneTage().catch(melden); };
+    reihe.append(zu);
+  }
+  ed.append(reihe);
+}
+
+async function korrigieren(t, typ) {
+  const antwort = await fetch(new URL(`/days/${t.tag}`, location.origin), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", "Authorization": "Bearer " + schluessel.lesen() },
+    body: JSON.stringify({ typ }),
+  }).catch(() => null);
+  if (!antwort || !antwort.ok) {
+    if (antwort && antwort.status === 401) schluessel.setzen("");
+    const grund = !antwort ? "Pi nicht erreichbar"
+      : antwort.status === 401 ? "Schlüssel falsch — bitte neu eingeben"
+      : (await antwort.json().catch(() => ({}))).detail ?? "HTTP " + antwort.status;
+    zeichneEditor(t, grund);
+    return;
+  }
+  zustand.tageGeladen = Date.now();
+  await zeichneTage().catch(melden);
+}
+
 async function zeichne() {
   knoepfe($("bereiche"), BEREICHE, zustand.bereich, (v) => zustand.bereich = v);
   knoepfe($("perioden"), [["Tage", "day"], ["Monate", "month"]], zustand.periode,
@@ -602,7 +747,11 @@ async function zeichne() {
                + `<td>${zahl(e.kwh * zustand.preis, 2)} €</td></tr>`;
         }).join("");
 
-    await zeichneVerlauf();
+    // Die Tage ändern sich langsam und kosten den Pi knapp eine Sekunde:
+    // nicht bei jedem 30-s-Takt, sondern höchstens alle 10 Minuten.
+    const tageFaellig = Date.now() - zustand.tageGeladen > 600000;
+    if (tageFaellig) zustand.tageGeladen = Date.now();
+    await Promise.all([zeichneVerlauf(), tageFaellig ? zeichneTage() : null]);
   } catch (fehler) {
     melden(fehler);
   }

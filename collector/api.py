@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Phase 3 — read-only JSON API over the collected data.
 
-No route writes anything: the connection runs with PRAGMA query_only, so even
-a mistake cannot mutate the database. Bucketing happens server-side so the Mac
-never pulls raw rows.
+The measurement database is never written: its connection runs with PRAGMA
+query_only, so even a mistake cannot mutate it. The one exception to "read-only"
+is PUT /days/{tag} — the user's corrections of the detected day type. Those go
+to a separate file (labels.db), need their own key (LABEL_TOKEN), and cannot
+touch the measurements. Bucketing happens server-side so the Mac never pulls
+raw rows.
 
 Usage:
     python api.py            # serves on API_HOST:API_PORT from fritzbox.env
@@ -12,14 +15,16 @@ Usage:
 from __future__ import annotations
 
 import calendar
+import secrets
 import sqlite3
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 
+import days
 import fritzbox
 
 DEFAULT_DB = Path(__file__).resolve().parent / "data.db"
@@ -30,6 +35,10 @@ STALE_AFTER_S = 600   # five missed live cycles → not ok
 CONFIG = fritzbox.load_config()
 DB_PATH = Path(CONFIG.get("DB_PATH") or DEFAULT_DB)
 API_TOKEN = CONFIG.get("API_TOKEN") or ""
+# Korrekturen der Tagestypen: eigene Datei, eigener Schlüssel. Ohne Schlüssel
+# ist das Schreiben abgeschaltet.
+LABELS_PATH = Path(CONFIG.get("LABELS_DB_PATH") or DB_PATH.with_name("labels.db"))
+LABEL_TOKEN = CONFIG.get("LABEL_TOKEN") or ""
 
 app = FastAPI(title="FRITZ!Box Energy Monitor", version="3", docs_url=None,
               redoc_url=None, openapi_url=None)
@@ -66,6 +75,16 @@ def require_token(request: Request) -> None:
 auth = [Depends(require_token)]
 
 
+def require_label_token(request: Request) -> None:
+    """Schreiben nur mit LABEL_TOKEN — anders als beim Lesen auch im Heimnetz."""
+    if not LABEL_TOKEN:
+        raise HTTPException(status_code=403, detail="Korrekturen sind abgeschaltet "
+                                                    "(LABEL_TOKEN nicht gesetzt)")
+    scheme, _, token = request.headers.get("authorization", "").partition(" ")
+    if scheme.lower() != "bearer" or not secrets.compare_digest(token, LABEL_TOKEN):
+        raise HTTPException(status_code=401, detail="falscher oder fehlender Schlüssel")
+
+
 def meta_value(conn: sqlite3.Connection, key: str) -> str | None:
     row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
     return row["value"] if row else None
@@ -98,7 +117,7 @@ def period_starts(period: str, n: int) -> list[int]:
 
 
 # --------------------------------------------------------------------------
-# routes — all read-only
+# routes — read-only, except PUT /days/{tag} (corrections, separate file)
 # --------------------------------------------------------------------------
 
 @app.get("/", include_in_schema=False)
@@ -414,6 +433,29 @@ def forecast(conn: sqlite3.Connection = Depends(db)) -> dict:
             "preis_pro_kwh": price,
         },
     }
+
+
+@app.get("/days", dependencies=auth)
+def days_route(
+    n: int = Query(42, ge=1, le=366),
+    conn: sqlite3.Connection = Depends(db),
+) -> list[dict]:
+    """Tagestyp je Tag (weg, homeoffice, unterwegs, zuhause): erkannt aus dem
+    Lastverlauf (siehe days.py), überschrieben von deinen Korrekturen."""
+    return days.tage(conn, n, korrekturen=days.korrekturen_lesen(LABELS_PATH))
+
+
+@app.put("/days/{tag}", dependencies=[Depends(require_label_token)])
+def day_correct(tag: date, typ: str | None = Body(..., embed=True)) -> dict:
+    """Die einzige schreibende Route. Setzt den Typ eines Tages, null nimmt die
+    Korrektur zurück. Schreibt nur labels.db, nie die Messdaten."""
+    if tag > datetime.now().astimezone().date():
+        raise HTTPException(status_code=400, detail="Tag liegt in der Zukunft")
+    if typ is not None and typ not in days.TYPEN:
+        raise HTTPException(status_code=400,
+                            detail=f"typ muss einer von {', '.join(days.TYPEN)} sein")
+    days.korrektur_setzen(LABELS_PATH, tag, typ)
+    return {"tag": tag.isoformat(), "typ": typ}
 
 
 def load_stats(conn: sqlite3.Connection, table: str, where: str,

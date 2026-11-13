@@ -6,7 +6,9 @@
     <string>local.energymonitor.backup</string>
     <key>ProgramArguments</key>
     <array>
-        <string>PFAD_ZUM_SKRIPT</string>
+        <!-- Nicht in ~/Documents: dort darf launchd nicht lesen (Exit 126).
+             Siehe README, Abschnitt Backup. -->
+        <string>/Users/BENUTZER/Library/Application Support/EnergyMonitor/backup-from-pi.sh</string>
     </array>
     <!-- Sonntags um 10 Uhr. Verpasste Termine (Mac aus) holt launchd nach. -->
     <key>StartCalendarInterval</key>
@@ -19,8 +21,8 @@
         <integer>0</integer>
     </dict>
     <key>StandardOutPath</key>
-    <string>/tmp/energymonitor-backup.log</string>
+    <string>/Users/BENUTZER/Library/Logs/EnergyMonitor/backup.log</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/energymonitor-backup.log</string>
+    <string>/Users/BENUTZER/Library/Logs/EnergyMonitor/backup.log</string>
 </dict>
 </plist>

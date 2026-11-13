@@ -24,7 +24,12 @@ outside, and **`report.py`** — daily mail report plus alerts, on an hourly tim
   **hourly** timer (`fritz-report.timer`), stdlib only, outbound SMTP, opens the
   DB read-only. Deliberately does not import `fritzbox.py`: a broken
   `fritzconnection` must not take the heartbeat down with it.
-- `scripts/` — weekly database backup from the Pi, launchd plists.
+- `collector/days.py` — day types (`weg`, `homeoffice`, `unterwegs`, `zuhause`)
+  detected from the load profile, plus the user's corrections in `labels.db`.
+  Stdlib only, so forecast and `report.py` can use it too. Calibrated on
+  88 full days incl. a month of absence (one miss: a laundry day looked like
+  home office — corrected by hand, rule deliberately left alone).
+- `scripts/` — weekly database backup from the Pi (`data.db` and `labels.db`), launchd plists.
 
 ## Verified facts — treat as given, do not re-derive or "correct"
 - The meter's AIN is `FRITZBOX_AIN` in `fritzbox.env` (**contains a space**, URL-encode it).
@@ -69,7 +74,8 @@ pure fiction — this produced a 2.29 kWh "fridge" reading on the first dry run.
 
 ## Non-negotiables
 - **Read-only** end to end. Only `getdevicelistinfos` and `getbasicdevicestats`. No switch commands,
-  no write/mutate API routes, ever. The API's SQLite connection runs with `PRAGMA query_only`.
+  no write/mutate API routes — with the one exception under "Deliberate departures"
+  (day-type corrections). The API's connection to `data.db` runs with `PRAGMA query_only`.
 - **Local-only.** Pi↔FRITZ!Box, Mac↔Pi. No cloud, telemetry, iCloud, MyFRITZ.
 - **Secrets:** FRITZ!Box credentials only on the Pi, in `~/energiepi/fritzbox.env` (chmod 600),
   read by the scripts themselves. Never on the Mac, never committed, never logged.
@@ -100,6 +106,14 @@ pure fiction — this produced a 2.29 kWh "fridge" reading on the first dry run.
   otherwise readings pile up under the previous appliance's name — this already
   happened once and needed a relabel of `device_samples`/`device_counters` by
   timestamp. Past names are listed in `CLAUDE.local.md`.
+- **One write route: `PUT /days/{tag}`**, decided 2026-11-10. Detected presence
+  can be wrong, and an anomaly is only an anomaly against the right expectation,
+  so the user must be able to correct it. Limits that keep the read-only spirit:
+  writes go **only to `labels.db`**, a separate file next to `data.db` (which stays
+  `query_only`); only one table of `{tag, typ}`; needs its own key `LABEL_TOKEN` in
+  `fritzbox.env` — required even on the LAN, unlike reads; without it the route
+  returns 403. The web page keeps the key in `localStorage`. Do not add further
+  write routes on this precedent.
 - **No Settings view** (phase 6 dropped). To change address or token, delete
   `~/Library/Containers/local.energymonitor/Data/Library/Application Support/credentials.json`
   and restart the app.
@@ -138,8 +152,11 @@ Two things the app must keep doing or it dies silently:
   the build directory and the app bundle. If the project moves, delete that cache directory.
 - Pi: `scp` the changed file to `~/energiepi/` (host in `CLAUDE.local.md`), then
   `sudo systemctl restart fritz-harvester` / `fritz-api`.
-- Backup: `scripts/backup-from-pi.sh` (target in gitignored `scripts/backup.env`), weekly via launchd, `VACUUM INTO` on the Pi for a consistent
-  snapshot, `PRAGMA integrity_check` before rotation.
+- Backup: `scripts/backup-from-pi.sh` (target in gitignored `scripts/backup.env`), weekly via launchd.
+  **launchd runs an installed copy in `~/Library/Application Support/EnergyMonitor/`** — macOS
+  blocks launchd from `~/Documents` (exit 126; backups silently stopped 2026-08-13..11-13).
+  Re-copy script and `backup.env` there after changes. Log: `~/Library/Logs/EnergyMonitor/backup.log`.
+  `VACUUM INTO` on the Pi for a consistent snapshot, `PRAGMA integrity_check` before rotation.
 
 ## Workflow — phase gate
 One phase at a time, in spec order. After each: **stop, summarize, wait for confirmation.**
