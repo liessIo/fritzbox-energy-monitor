@@ -29,10 +29,13 @@ outside, and **`report.py`** — daily mail report plus alerts, on an hourly tim
   Stdlib only, so forecast and `report.py` can use it too. Calibrated on
   88 full days incl. a month of absence (one miss: a laundry day looked like
   home office — corrected by hand, rule deliberately left alone).
-- `collector/prices.py` — price per kWh with a start date (`prices` in
-  `labels.db`, edited on the web page). Costs are split at every price change
-  and priced per piece from counter deltas; `PRICE_PER_KWH` only applies until
-  a price is entered. Day and month boundaries come from calendar dates, never
+- `collector/prices.py` — energy price (`kwh`, €/kWh) and yearly base price
+  (`jahr`, €/year), each with a start date (`prices` in `labels.db`, edited on
+  the web page). Energy costs are split at every price change and priced per
+  piece from counter deltas; `PRICE_PER_KWH` only applies until a price is
+  entered. The base price shows only in the year view of `/consumption`
+  (pro rata by day when it changes mid-year), never on days, months or the
+  header tiles. Day and month boundaries come from calendar dates, never
   from `datetime - timedelta` (that kept today's UTC offset and started every
   period before the DST change at 01:00).
 - `scripts/` — weekly database backup from the Pi (`data.db` and `labels.db`), launchd plists.
@@ -119,13 +122,13 @@ is wrapped in `try`: a bug there must not stop the heartbeat mail.
   otherwise readings pile up under the previous appliance's name — this already
   happened once and needed a relabel of `device_samples`/`device_counters` by
   timestamp. Past names are listed in `CLAUDE.local.md`.
-- **Two write routes: `PUT /days/{tag}` and `PUT /prices/{ab}`**, decided
+- **Two write routes: `PUT /days/{tag}` and `PUT /prices/{art}/{ab}`**, decided
   2026-11-10 and 2026-11-13. Detected presence can be wrong, and an anomaly is
   only an anomaly against the right expectation, so the user must be able to
   correct it; the price per kWh changes with the tariff and must keep past
-  periods at their old price. Limits that keep the read-only spirit: writes go
+  periods at their old price (energy and base price alike). Limits that keep the read-only spirit: writes go
   **only to `labels.db`**, a separate file next to `data.db` (which stays
-  `query_only`); two tables, `day_labels {tag, typ}` and `prices {ab, euro_kwh}`;
+  `query_only`); two tables, `day_labels {tag, typ}` and `prices {art, ab, wert}`;
   both need their own key `LABEL_TOKEN` in `fritzbox.env` — required even on the
   LAN, unlike reads; without it the routes return 403. The web page keeps the key
   in `localStorage`. Do not add further write routes on this precedent.

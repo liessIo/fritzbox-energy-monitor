@@ -313,7 +313,7 @@ def build_report(conn, now: int, device: str, price: float,
     def preis_am(ts):
         try:
             import prices
-            return prices.preis_am(prices.lesen(labels_path, price),
+            return prices.preis_am(prices.lesen(labels_path, "kwh", price),
                                    datetime.fromtimestamp(ts).date())
         except Exception:
             return price

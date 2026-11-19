@@ -3,7 +3,7 @@
 
 The measurement database is never written: its connection runs with PRAGMA
 query_only, so even a mistake cannot mutate it. The one exception to "read-only"
-are PUT /days/{tag} and PUT /prices/{ab} — the user's corrections of the
+are PUT /days/{tag} and PUT /prices/{art}/{ab} — the user's corrections of the
 detected day type and the electricity price with its start date. Both go to a
 separate file (labels.db), need their own key (LABEL_TOKEN), and cannot touch
 the measurements. Bucketing happens server-side so the Mac never pulls
@@ -22,8 +22,9 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
 import days
 import fritzbox
@@ -96,8 +97,8 @@ def meta_value(conn: sqlite3.Connection, key: str) -> str | None:
     return row["value"] if row else None
 
 
-def preise_lesen() -> list[dict]:
-    return prices.lesen(LABELS_PATH, GRUNDPREIS)
+def preise_lesen(art: str = "kwh") -> list[dict]:
+    return prices.lesen(LABELS_PATH, art, GRUNDPREIS if art == "kwh" else 0.0)
 
 
 def kosten(conn: sqlite3.Connection, start: int, end: int, base_wh: float | None,
@@ -107,7 +108,7 @@ def kosten(conn: sqlite3.Connection, start: int, end: int, base_wh: float | None
     ein Monat mit Tarifwechsel am 15. kostet so genau, was er gekostet hat."""
     if base_wh is None:
         return None
-    punkte = [start] + [ts for ts, _ in prices.wechsel_ts(preise)
+    punkte = [start] + [ts for ts in prices.wechsel_ts(preise)
                         if start < ts < end] + [end]
     euro, vorher = 0.0, base_wh
     for a, b in zip(punkte, punkte[1:]):
@@ -133,13 +134,15 @@ def auto_bucket(span: int) -> int:
 
 
 def period_starts(period: str, n: int) -> list[int]:
-    """Local-time start of each of the last n days/months, oldest first."""
+    """Local-time start of each of the last n days/months/years, oldest first."""
     # Über Kalenderdaten gehen, nicht über datetime-Arithmetik: die behielt
     # den UTC-Versatz von heute bei, und jenseits der Zeitumstellung begann
     # jeder Tag und Monat um 1 Uhr statt um Mitternacht.
     today = datetime.now().astimezone().date()
     if period == "day":
         tage = [today - timedelta(days=i) for i in range(n)]
+    elif period == "year":
+        tage = [date(today.year - i, 1, 1) for i in range(n)]
     else:
         tage, jahr, monat = [], today.year, today.month
         for _ in range(n):
@@ -157,7 +160,9 @@ def period_starts(period: str, n: int) -> list[int]:
 def index() -> FileResponse:
     """Die Weboberfläche. Eine einzelne Datei, keine Fremdbibliotheken —
     die Seite muss auch ohne Internetzugang funktionieren."""
-    return FileResponse(WEB_DIR / "index.html")
+    # no-cache: der Browser fragt jedes Mal nach (ETag, meist 304). Ohne das
+    # zeigte Chrome nach einem Update die alte Seite gegen die neue API.
+    return FileResponse(WEB_DIR / "index.html", headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/health", dependencies=auth)
@@ -313,7 +318,7 @@ def device_history(
 
 @app.get("/consumption", dependencies=auth)
 def consumption(
-    period: str = Query("day", pattern="^(day|month)$"),
+    period: str = Query("day", pattern="^(day|month|year)$"),
     n: int = Query(30, ge=1, le=366),
     conn: sqlite3.Connection = Depends(db),
 ) -> list[dict]:
@@ -321,6 +326,7 @@ def consumption(
     starts = period_starts(period, n)
     bounds = starts + [int(time.time()) + 1]
     preise = preise_lesen()
+    grund = preise_lesen("jahr") if period == "year" else []
     result = []
     for i, start in enumerate(starts):
         end = bounds[i + 1]
@@ -357,6 +363,10 @@ def consumption(
             # Mit dem Preis, der damals galt — nicht mit dem heutigen.
             "euro": kosten(conn, base["ts"] if partial_from else start, end,
                            base["energy_wh"], preise) if kwh is not None else None,
+            # Grundpreis nur bei Jahren, und für das ganze Jahr: er ist fällig,
+            # egal wie viel verbraucht wurde oder ob die Aufzeichnung lief.
+            "grund_euro": prices.grundpreis_jahr(
+                grund, date.fromtimestamp(start).year) if grund else None,
             "counter_wh": last["energy_wh"] if last else None,
             # None = der Zeitraum ist vollstaendig abgedeckt.
             "partial_from_ts": partial_from,
@@ -530,10 +540,21 @@ def days_route(
     return days.tage(conn, n, korrekturen=days.korrekturen_lesen(LABELS_PATH))
 
 
+class TypBody(BaseModel):
+    typ: str | None          # Pflichtfeld, aber null erlaubt (= zurücknehmen)
+
+
+class WertBody(BaseModel):
+    wert: float | None       # Pflichtfeld, aber null erlaubt (= löschen)
+
+
+# Body(..., embed=True) mit "str | None" lehnt ein explizites null als
+# „fehlt“ ab (422) — Zurücknehmen und Löschen gingen damit nie.
 @app.put("/days/{tag}", dependencies=[Depends(require_label_token)])
-def day_correct(tag: date, typ: str | None = Body(..., embed=True)) -> dict:
-    """Die einzige schreibende Route. Setzt den Typ eines Tages, null nimmt die
+def day_correct(tag: date, body: TypBody) -> dict:
+    """Schreibende Route (wie PUT /prices). Setzt den Typ eines Tages, null nimmt die
     Korrektur zurück. Schreibt nur labels.db, nie die Messdaten."""
+    typ = body.typ
     if tag > datetime.now().astimezone().date():
         raise HTTPException(status_code=400, detail="Tag liegt in der Zukunft")
     if typ is not None and typ not in days.TYPEN:
@@ -545,22 +566,26 @@ def day_correct(tag: date, typ: str | None = Body(..., embed=True)) -> dict:
 
 @app.get("/prices", dependencies=auth)
 def prices_route() -> dict:
-    """Alle Preise mit Startdatum, dazu der heute gültige."""
-    preise = preise_lesen()
-    return {"preise": preise, "anfang": prices.ANFANG,
-            "heute": prices.preis_am(preise, datetime.now().astimezone().date())}
+    """Arbeitspreis (kwh) und Grundpreis (jahr), je mit Startdatum, dazu der
+    heute gültige Wert."""
+    heute = datetime.now().astimezone().date()
+    ergebnis: dict = {"anfang": prices.ANFANG}
+    for art in prices.ARTEN:
+        liste = preise_lesen(art)
+        ergebnis[art] = {"preise": liste, "heute": prices.preis_am(liste, heute)}
+    return ergebnis
 
 
-@app.put("/prices/{ab}", dependencies=[Depends(require_label_token)])
-def price_set(ab: str, euro_kwh: float | None = Body(..., embed=True)) -> dict:
-    """Preis ab einem Tag setzen (auch künftig), null löscht ihn. ab = ANFANG
-    ändert den Preis, der von Beginn der Aufzeichnung an gilt. Schreibt nur
-    labels.db."""
+@app.put("/prices/{art}/{ab}", dependencies=[Depends(require_label_token)])
+def price_set(art: str, ab: str, body: WertBody) -> dict:
+    """Preis einer Art ab einem Tag setzen (auch künftig), null löscht ihn.
+    ab = ANFANG ändert den Wert, der von Beginn an gilt. Schreibt nur labels.db."""
+    wert = body.wert
     try:
-        prices.setzen(LABELS_PATH, ab, euro_kwh)
+        prices.setzen(LABELS_PATH, art, ab, wert)
     except ValueError as fehler:
         raise HTTPException(status_code=400, detail=str(fehler)) from None
-    return {"ab": ab, "euro_kwh": euro_kwh}
+    return {"art": art, "ab": ab, "wert": wert}
 
 
 def load_stats(conn: sqlite3.Connection, table: str, where: str,
