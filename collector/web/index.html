@@ -374,6 +374,12 @@ function zeitraumStunden(alle, i) {
   return Math.max((Math.min(naechste, jetzt) - von) / 3600, 1);
 }
 
+// „24.11. 17:53 – 25.11. 09:23“ — wann der Pi keine Werte hatte.
+const lueckenText = (liste = []) => liste.map(l => {
+  const f = (ts) => new Date(ts * 1000).toLocaleString("de-DE",
+    { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }).replace(",", "");
+  return `${f(l.von)} – ${f(l.bis)}`;
+}).join(", ");
 const abKuerzel = (ts) => new Date(ts * 1000)
   .toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" });
 
@@ -408,6 +414,13 @@ function balken(svgId, tipId, eintraege, gipfel) {
       rect.setAttribute("stroke-dasharray", "3 2");
     }
     svg.append(rect);
+    // Anteil aus einer Lücke (Pi ohne Strom): oben im Balken, nur angedeutet.
+    const geschaetzt = e.geschaetzt_kwh ?? 0;
+    if (geschaetzt >= 0.05) {
+      svg.append(el("rect", { x: px, y: y(e.kwh), width: breite, height: y(e.kwh - geschaetzt) - y(e.kwh),
+        fill: "var(--flaeche)", "fill-opacity": ".55", stroke: "var(--serie3)",
+        "stroke-dasharray": "3 2", rx: 4, "pointer-events": "none" }));
+    }
     const d = new Date(e.start_ts * 1000);
     const beschriftung = zustand.periode === "day"
       ? d.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" })
@@ -422,7 +435,9 @@ function balken(svgId, tipId, eintraege, gipfel) {
       tip.innerHTML = `<span class="zeit">${e.start}</span><b>${zahl(e.kwh, 2)} kWh</b>`
         + ` <span style="color:var(--ink3)">${e.euro != null ? zahl(e.euro, 2) + " €" : ""}`
         + (e.grund_euro != null ? ` + ${zahl(e.grund_euro, 2)} € Grundpreis` : "") + `</span>`
-        + (teil ? `<span style="color:var(--ink3)"> · erst ab ${abKuerzel(e.partial_from_ts)}</span>` : "");
+        + (teil ? `<span style="color:var(--ink3)"> · erst ab ${abKuerzel(e.partial_from_ts)}</span>` : "")
+        + (geschaetzt >= 0.05 ? `<span style="color:var(--ink3)"><br>davon ${zahl(geschaetzt, 1)} kWh geschätzt`
+           + ` (Lücke ${lueckenText(e.luecken)})</span>` : "");
       tip.style.opacity = 1;
       const links = (px + breite / 2) / B * box.width;
       tip.style.left = Math.min(Math.max(links - tip.offsetWidth / 2, 0), box.width - tip.offsetWidth) + "px";
@@ -900,8 +915,11 @@ async function zeichne() {
       "<tr><th>Zeitraum</th><th>kWh</th><th>Ø Leistung</th>"
       + (mitGrund ? "<th>Verbrauch</th><th>Grundpreis</th><th>Summe</th></tr>" : "<th>Kosten</th></tr>")
       + zeilen.map(({ e, stunden }) => {
-          const hinweis = e.partial_from_ts != null
-            ? ` <span style="color:var(--ink3)">ab ${abKuerzel(e.partial_from_ts)}</span>` : "";
+          const hinweis = (e.partial_from_ts != null
+            ? ` <span style="color:var(--ink3)">ab ${abKuerzel(e.partial_from_ts)}</span>` : "")
+            + ((e.geschaetzt_kwh ?? 0) >= 0.05
+            ? ` <span style="color:var(--ink3)" title="Lücke ${lueckenText(e.luecken)}">`
+              + `· ${zahl(e.geschaetzt_kwh, 1)} kWh geschätzt</span>` : "");
           const summe = e.euro != null && e.grund_euro != null ? e.euro + e.grund_euro : null;
           return `<tr><td>${e.start}${hinweis}</td><td>${zahl(e.kwh, 2)}</td>`
                + `<td>${zahl(e.kwh * 1000 / stunden)} W</td><td>${euro(e.euro)}</td>`

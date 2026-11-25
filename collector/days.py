@@ -32,6 +32,8 @@ from __future__ import annotations
 import sqlite3
 from datetime import date, datetime, time, timedelta
 
+import gaps
+
 TYPEN = ("weg", "homeoffice", "unterwegs", "zuhause")
 
 HOMEOFFICE_W = 60        # Dauerlast tagsüber über der Nacht, ab hier Homeoffice
@@ -77,13 +79,6 @@ def _grenze(tag: date) -> int:
     return int(datetime.combine(tag, time()).astimezone().timestamp())
 
 
-def _zaehler_vor(conn: sqlite3.Connection, ts: int) -> tuple[int, float] | None:
-    row = conn.execute(
-        "SELECT ts, energy_wh FROM counter_readings WHERE ts < ? "
-        "ORDER BY ts DESC LIMIT 1", (ts,)).fetchone()
-    return (row[0], row[1]) if row else None
-
-
 def einordnen(merkmale: dict, tag: date) -> tuple[str, bool, str]:
     """(typ, sicher, begruendung) aus den Merkmalen eines Tages."""
     nacht = merkmale["nacht_w"] if merkmale["nacht_w"] is not None else NACHT_ERSATZ_W
@@ -91,7 +86,8 @@ def einordnen(merkmale: dict, tag: date) -> tuple[str, bool, str]:
     tagsueber = merkmale["tag_w"]
     kwh = merkmale["kwh"]
     spitzen = merkmale["spitzen"]
-    vollstaendig = merkmale["proben"] >= MIN_PROBEN and kwh is not None
+    vollstaendig = (merkmale["proben"] >= MIN_PROBEN and kwh is not None
+                    and not merkmale.get("luecke_h"))
 
     abend_plus = (abend - nacht) if abend is not None else None
     if (spitzen <= 1 and abend_plus is not None and abend_plus < WEG_ABEND_W
@@ -165,6 +161,9 @@ def tage(conn: sqlite3.Connection, n: int, heute: date | None = None,
                    # Was die Erkennung allein sagt — bleibt sichtbar, auch
                    # wenn eine Korrektur den Typ überschreibt.
                    "erkannt": typ, "korrigiert": False, **merkmale}
+        if eintrag.get("luecke_h"):
+            eintrag["grund"] += (f" — {eintrag['luecke_h']:.1f} h ohne Messwerte"
+                                 .replace(".", ","))
         if korrekturen and tag.isoformat() in korrekturen:
             eintrag.update(typ=korrekturen[tag.isoformat()], sicher=True,
                            korrigiert=True)
@@ -183,12 +182,12 @@ def _merkmale(conn: sqlite3.Connection, tag: date,
         return None
     start, ende = _grenze(tag), _grenze(tag + timedelta(days=1))
 
-    # Zählerdifferenz wie in /consumption, aber nur, wenn der Basisstand
-    # unmittelbar vor Mitternacht liegt — sonst wäre es eine Lücke.
-    kwh = None
-    basis, letzter = _zaehler_vor(conn, start), _zaehler_vor(conn, ende)
-    if basis and letzter and start - basis[0] < 3600 and letzter[0] >= start:
-        kwh = round((letzter[1] - basis[1]) / 1000, 3)
+    # Zählerdifferenz wie in /consumption, über Lücken anteilig aufgeteilt.
+    # Ein Tag mit Lücke ist nie sicher: Abend oder Nacht fehlen, und seine
+    # kWh sind zum Teil geschätzt.
+    kwh, _ = gaps.kwh(conn, start, ende)
+    luecke_s = sum(gaps.ueberlappung_s(l, start, ende)
+                   for l in gaps.luecken(conn, start, ende))
 
     spitzen, vorher = 0, False
     for stunde, p in reihe:
@@ -199,6 +198,7 @@ def _merkmale(conn: sqlite3.Connection, tag: date,
     return {
         "kwh": kwh,
         "proben": len(reihe),
+        "luecke_h": round(luecke_s / 3600, 1),
         "nacht_w": _quantil([p for s, p in reihe if 1 <= s < 5], .1),
         "tag_w": _quantil([p for s, p in reihe if 9 <= s < 17], .1),
         "abend_w": _quantil([p for s, p in reihe if 18 <= s < 23], .5),

@@ -38,6 +38,15 @@ outside, and **`report.py`** — daily mail report plus alerts, on an hourly tim
   header tiles. Day and month boundaries come from calendar dates, never
   from `datetime - timedelta` (that kept today's UTC offset and started every
   period before the DST change at 01:00).
+- `collector/gaps.py` — gaps in the recording (Pi without power, crash): no
+  counter reading for > 15 min. The counter keeps running in the reader, so a
+  gap's energy is known. Days after the gap's start get their typical
+  consumption (median hourly profile, 8 weeks, workday/weekend), the first day
+  gets the rest — deviations happen in the evening, mornings are routine. Marked
+  `geschaetzt_kwh` only where the gap crosses a period boundary (totals across
+  the whole gap stay exact). The power curve of a gap is lost and never
+  invented. Days with a gap are never `sicher` and stay out of forecast and
+  anomaly baselines; the daily report lists gaps since yesterday 0:00.
 - `scripts/` — weekly database backup from the Pi (`data.db` and `labels.db`), launchd plists.
 
 ## Verified facts — treat as given, do not re-derive or "correct"

@@ -123,7 +123,14 @@ def day_start(offset_days: int = 0) -> int:
 
 
 def counter_kwh(conn, start: int, end: int) -> float | None:
-    """kWh aus Zaehlerdifferenz. Nie aus Leistung integriert."""
+    """kWh aus Zaehlerdifferenz. Nie aus Leistung integriert. Ueber Luecken
+    (Pi ohne Strom) anteilig aufgeteilt, siehe gaps.py — sonst stuende nach
+    einer Nacht ohne Strom der Vortag zu niedrig da."""
+    try:
+        import gaps
+        return gaps.kwh(conn, start, end)[0]
+    except Exception:
+        pass   # Herzschlag geht vor: dann eben wie frueher
     base = conn.execute(
         "SELECT ts, energy_wh FROM counter_readings WHERE ts < ? "
         "ORDER BY ts DESC LIMIT 1", (start,)).fetchone()
@@ -243,12 +250,15 @@ def day_findings(conn, labels_path: Path) -> tuple[str | None, list[str]]:
     if y is None or y["typ"] is None:
         return None, []
     vorher = [t for t in liste if t["tag"] < y["tag"] and t["kwh"] is not None
-              and t["proben"] >= days.MIN_PROBEN]
+              and t["proben"] >= days.MIN_PROBEN and not t.get("luecke_h")]
 
     herkunft = ("von dir korrigiert" if y["korrigiert"]
                 else "erkannt" if y["sicher"] else "erkannt, unsicher")
     typ_text = f"{TYPE_NAMES[y['typ']]} ({herkunft})"
     funde: list[str] = []
+    if y.get("luecke_h"):
+        # Halber Tag ohne Messwerte: jeder Vergleich wäre geraten.
+        return typ_text + ", keine Prüfung (Lücke in der Aufzeichnung)", []
 
     gleiche = [t["kwh"] for t in vorher if t["typ"] == y["typ"]][-30:]
     if len(gleiche) >= SAME_TYPE_MIN_DAYS:
@@ -339,6 +349,19 @@ def build_report(conn, now: int, device: str, price: float,
         f"  Kühlschrank taktete in {cycles['n']} der letzten 24 Stunden",
     ]
     subject = f"Energiebericht {yesterday}: {kwh(y_kwh)}"
+
+    # Lücken seit gestern 0 Uhr: Pi ohne Strom, abgestürzt oder Box weg.
+    # Der Bericht selbst kam dann verspätet — hier steht, warum.
+    try:
+        import gaps
+        for l in gaps.luecken(conn, y_start, now + 1):
+            f = lambda ts: datetime.fromtimestamp(ts).strftime("%d.%m. %H:%M")
+            lines.append(
+                f"  Lücke            {f(l['von'])} – {f(l['bis'])} "
+                f"({(l['bis'] - l['von']) / 3600:.1f} h), {l['wh'] / 1000:.2f} kWh darin, "
+                "nach typischem Tagesverlauf verteilt")
+    except Exception as fehler:
+        lines.append(f"  Lücken-Prüfung fehlgeschlagen: {fehler}")
 
     try:
         typ_text, funde = day_findings(conn, labels_path)

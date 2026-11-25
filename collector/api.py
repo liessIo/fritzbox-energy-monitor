@@ -28,6 +28,7 @@ from pydantic import BaseModel
 
 import days
 import fritzbox
+import gaps
 import prices
 
 DEFAULT_DB = Path(__file__).resolve().parent / "data.db"
@@ -112,10 +113,10 @@ def kosten(conn: sqlite3.Connection, start: int, end: int, base_wh: float | None
                         if start < ts < end] + [end]
     euro, vorher = 0.0, base_wh
     for a, b in zip(punkte, punkte[1:]):
-        row = conn.execute(
-            "SELECT energy_wh FROM counter_readings WHERE ts < ? "
-            "ORDER BY ts DESC LIMIT 1", (b,)).fetchone()
-        stand = max(row["energy_wh"], vorher) if row else vorher
+        # In einer Lücke interpoliert (gaps.py), damit ein Preiswechsel
+        # mitten in einer Lücke die Energie anteilig aufteilt.
+        st = gaps.stand(conn, b)
+        stand = max(st[0], vorher) if st else vorher
         preis = prices.preis_am(preise, datetime.fromtimestamp(a).astimezone().date())
         if preis is None:
             return None
@@ -351,9 +352,14 @@ def consumption(
             if first is not None and last["ts"] > first["ts"]:
                 base, partial_from = first, first["ts"]
 
-        kwh = None
-        if base is not None and last is not None:
+        kwh, geschaetzt = None, 0.0
+        if partial_from is not None:
             kwh = round((last["energy_wh"] - base["energy_wh"]) / 1000.0, 3)
+        elif base is not None:
+            # Über Lücken hinweg aufgeteilt statt alles dem ersten Zeitraum
+            # danach zuzuschlagen (gaps.py).
+            kwh, geschaetzt = gaps.kwh(conn, start, end)
+        luecken = gaps.luecken(conn, start, end) if kwh is not None else []
         result.append({
             "period": period,
             "start_ts": start,
@@ -362,7 +368,11 @@ def consumption(
             "kwh": kwh,
             # Mit dem Preis, der damals galt — nicht mit dem heutigen.
             "euro": kosten(conn, base["ts"] if partial_from else start, end,
-                           base["energy_wh"], preise) if kwh is not None else None,
+                           base["energy_wh"] if partial_from else gaps.stand(conn, start)[0],
+                           preise) if kwh is not None else None,
+            # Anteil aus Lücken, nach typischem Tagesverlauf verteilt (gaps.py).
+            "geschaetzt_kwh": geschaetzt,
+            "luecken": [{"von": l["von"], "bis": l["bis"]} for l in luecken],
             # Grundpreis nur bei Jahren, und für das ganze Jahr: er ist fällig,
             # egal wie viel verbraucht wurde oder ob die Aufzeichnung lief.
             "grund_euro": prices.grundpreis_jahr(
